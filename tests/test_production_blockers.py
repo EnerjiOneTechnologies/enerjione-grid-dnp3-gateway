@@ -38,8 +38,12 @@ def test_config_modulu_import_ederken_dogrulama_yapmaz(monkeypatch: pytest.Monke
 
     monkeypatch.setenv("APP_ENVIRONMENT", "production")
     monkeypatch.setenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+    # monkeypatch.delitem: test bitince ORIJINAL modul nesneleri geri konur.
+    # `del sys.modules[...]` geri koymuyordu; sonraki testler ayni modulun
+    # IKI ayri kopyasini goruyordu (orn. modul-duzeyi saat korumasi bir
+    # kopyaya baglanip digerinden okunuyordu).
     for mod in [m for m in sys.modules if m.startswith("dnp3_gateway")]:
-        del sys.modules[mod]
+        monkeypatch.delitem(sys.modules, mod)
     # Import PATLAMAMALI — dogrulama artik erisim aninda.
     cfg_mod = importlib.import_module("dnp3_gateway.config")
     assert hasattr(cfg_mod, "Settings")

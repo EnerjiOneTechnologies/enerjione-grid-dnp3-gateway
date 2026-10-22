@@ -45,9 +45,14 @@ Her container:
 Image GitHub Container Registry'de yayinlanir:
 
 ```
-ghcr.io/enerjione/enerjione-grid-dnp3-gateway:1.13.0    # surume kilitli (URETIM)
-ghcr.io/enerjione/enerjione-grid-dnp3-gateway:main      # main'in son hali (DENEME)
+ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:1.16.0    # surume kilitli (URETIM)
+ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:main      # main'in son hali (DENEME)
 ```
+
+> Depo 2026-10-22'de `EnerjiOneTechnologies` org'una tasindi. **1.15.1 ve
+> oncesi** imajlar eski adreste kalir:
+> `ghcr.io/enerjione/enerjione-grid-dnp3-gateway:<surum>`. Org adresi
+> 1.16.0'dan itibaren gecerlidir; Docker imaj adi kucuk harf olmak zorunda.
 
 Production deploy'larda **semver tag** kullanin (`:1.13.0`). Etiket politikasi
 (`.github/workflows/release-image.yml`):
@@ -73,12 +78,12 @@ saglamiyor.)
 ### Kaynaktan build (gelistirme)
 
 ```bash
-git clone https://github.com/enerjione/enerjione-grid-dnp3-gateway.git
+git clone https://github.com/EnerjiOneTechnologies/enerjione-grid-dnp3-gateway.git
 cd enerjione-grid-dnp3-gateway
 
 docker build \
     --build-arg DNP3_LIBRARY=yadnp3 \
-    -t ghcr.io/enerjione/enerjione-grid-dnp3-gateway:dev .
+    -t ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:dev .
 ```
 
 ## 2. Yeni gateway ekle (frontend akisi)
@@ -127,7 +132,7 @@ yalnizca ARIZA aninda gorunur.
 * `remote` — **uzak saha** kurulumu. NATS birincil, erisilemezse HTTP yedegi.
 
 **`--image` verilmezse `VERSION` dosyasindan EXACT semver turetilir**
-(orn. `ghcr.io/enerjione/enerjione-grid-dnp3-gateway:1.11.4`). Uretim
+(orn. `ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:1.11.4`). Uretim
 ciktisi bilerek `:latest`e **baglanmaz**: `:latest` ile dosyaya bakarak
 "hangi surum kurulu" sorusu cevaplanamaz ve siradan bir `docker compose pull`
 gateway'i sessizce baska bir surume gecirebilir. (`:latest` etiketi YAYINDA
@@ -136,7 +141,7 @@ basilmaya devam eder; degisen yalnizca tuketim tarafi.)
 Daha da kati bir pin isteniyorsa `--image` ile digest verilebilir:
 
 ```bash
-    --image ghcr.io/enerjione/enerjione-grid-dnp3-gateway@sha256:<digest>
+    --image ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway@sha256:<digest>
 ```
 
 ## 3. Calistirma

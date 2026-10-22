@@ -215,19 +215,39 @@ def test_dev_allows_rabbitmq_url_and_placeholder(
 
 
 # ==========================================================================
-# DNP3_TIME_SYNC — PROSEDUR SECIMI (1.15.1)
+# DNP3_TIME_SYNC — PROSEDUR SECIMI (1.15.1, varsayilan 1.16.0)
 # ==========================================================================
 
 
-def test_time_sync_varsayilani_degismedi(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Horstmann icin `nonlan` DOGRU olsa da GENEL VARSAYILAN degismedi.
+def test_time_sync_varsayilani_nonlan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1.16.0: VARSAYILAN `nonlan`.
 
-    Varsayilani degistirmek, Horstmann olmayan her kurulumda prosedur
-    degistirmek demektir; bu bir bakim paketinin isi degildir.
+    Filonun tamami Horstmann ve cihaz FC=24 + G50V3 desteklemez (manual 5.2).
+    `.env`te deger vermeyen kurulumlar onceki `lan` varsayilaniyla cihaz
+    saatini hic duzeltemiyordu. `lan` acikca secilebilir kalir (asagida).
     """
     monkeypatch.delenv("DNP3_TIME_SYNC", raising=False)
     s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.dnp3_time_sync == "lan"
+    assert s.dnp3_time_sync == "nonlan"
+
+
+def test_smart_half_open_varsayilani_900(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DNP3_SMART_HALF_OPEN_SEC", raising=False)
+    assert Settings(_env_file=None).dnp3_smart_half_open_sec == 900  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("deger", ["0", "120", "900", "86400"])
+def test_smart_half_open_gecerli_degerler(monkeypatch: pytest.MonkeyPatch, deger: str) -> None:
+    monkeypatch.setenv("DNP3_SMART_HALF_OPEN_SEC", deger)
+    assert Settings(_env_file=None).dnp3_smart_half_open_sec == int(deger)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("deger", ["1", "60", "119", "86401", "-5"])
+def test_smart_half_open_kisa_esik_reddedilir(monkeypatch: pytest.MonkeyPatch, deger: str) -> None:
+    """Kisa bir esik saglikli bir Smart oturumunu da yikardi — FAIL-CLOSED."""
+    monkeypatch.setenv("DNP3_SMART_HALF_OPEN_SEC", deger)
+    with pytest.raises(ValueError, match="DNP3_SMART_HALF_OPEN_SEC|greater_than|less_than"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
 
 
 @pytest.mark.parametrize("deger", ["lan", "nonlan", "none", "LAN", " NonLAN "])

@@ -124,7 +124,8 @@ DNP3_EVENT_BASELINE_INTERVAL_SEC=60
 # opendnp3 IO thread sayisi: 0 = otomatik (min 4). 100+ cihazda 8 onerilir.
 DNP3_MANAGER_THREADS=0
 # Outstation saatlerini senkronize et (drift + guc kesintisi sonrasi RTC reset).
-DNP3_TIME_SYNC=lan
+# Horstmann SN 2.0 yalnizca FC=23 + G50V1 destekler -> nonlan.
+DNP3_TIME_SYNC=nonlan
 
 # Loglama
 LOG_LEVEL=INFO

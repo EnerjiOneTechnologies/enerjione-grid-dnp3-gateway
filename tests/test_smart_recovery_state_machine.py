@@ -465,3 +465,94 @@ def test_smart_online_sessizken_yoklama_da_gondermez(saha) -> None:
     assert mm.gateway_trafigi == baslangic, (
         f"sessiz Smart oturumunda gateway {mm.gateway_trafigi - baslangic} istek gonderdi"
     )
+
+
+# ==========================================================================
+# YARI-ACIK SMART OTURUMU (1.16.0) — "cihaz online'da takili, restart duzeltiyor"
+# ==========================================================================
+#
+# Smart'ta keepalive ve tarama kapali; FIN'i kaybolan bir 4G oturumunda
+# `OnClose` HIC gelmez. Bu durumda bagli Smart oturumu `online`dan cikaran
+# hicbir kural yoktu: cihaz SURESIZ `online` gorunuyordu.
+
+ESIK = mod._SMART_HALF_OPEN_SEC
+
+
+def _linki_yaslandir(saha, code: str, saniye: float) -> None:
+    """Link acilis anini da geriye al (kanit/veri `yaslandir` ile)."""
+    saha.yaslandir(code, saniye)
+    c = saha.master(code).cache
+    with c._lock:
+        c._link_opened_at -= saniye
+
+
+@pytest.mark.parametrize("uc", ["listening", "initiating"])
+def test_yari_acik_smart_oturumu_esik_sonrasi_smart_idle_olur(saha, uc) -> None:
+    d = saha.cihaz(
+        "SN2_YA",
+        ip_endpoint_type=uc,
+        master_ip_port=20100 if uc == "initiating" else None,
+        session_policy="smart",
+        smart_max_silence_sec=86400,
+    )
+    _online_yap(saha, d)
+    eski = saha.master(d.code)
+
+    _linki_yaslandir(saha, d.code, ESIK + 60)
+    okumalar = saha.oku(d)
+
+    assert "comm_lost" not in _kaliteler(okumalar), "kanitli oturum kapanisi comm_lost uretti"
+    assert eski.cache.is_connected() is False
+    assert eski.cache.state() == "smart_idle"
+    assert eski.shutdown_sayisi == 1, "yari-acik oturumun master'i dusurulmedi"
+    assert d.code not in saha.reader._masters
+    assert eski.gateway_trafigi == 0, "yari-acik tespiti cihaza istek gonderdi"
+    assert saha.reader.recovery_stats()["smart_half_open_total"] == 1
+
+    # Bir sonraki tur: YENI master kurulur ve kalici kayittan smart_idle'a doner.
+    saha.masterlar.pop(d.code)
+    okumalar = saha.oku(d)
+    yeni = saha.master(d.code)
+    assert yeni is not eski
+    assert yeni.cache.state() == "smart_idle"
+    assert "comm_lost" not in _kaliteler(okumalar)
+
+
+def test_yari_acik_esik_altinda_oturum_korunur(saha) -> None:
+    d = _smart_cihaz(saha)
+    _online_yap(saha, d)
+    _linki_yaslandir(saha, d.code, ESIK - 120)
+    saha.oku(d)
+    mm = saha.master(d.code)
+    assert mm.cache.state() == "online"
+    assert mm.cache.is_connected() is True
+    assert mm.shutdown_sayisi == 0
+
+
+def test_yari_acik_tespiti_kapatilabilir(saha) -> None:
+    saha.reader._smart_half_open_sec = 0
+    d = _smart_cihaz(saha)
+    _online_yap(saha, d)
+    _linki_yaslandir(saha, d.code, ESIK * 10)
+    saha.oku(d)
+    assert saha.master(d.code).cache.state() == "online"
+    assert saha.master(d.code).shutdown_sayisi == 0
+
+
+def test_yari_acik_ucusta_komut_varken_oturum_yikilmaz(saha) -> None:
+    import time as _time
+
+    d = _smart_cihaz(saha)
+    _online_yap(saha, d)
+    _linki_yaslandir(saha, d.code, ESIK + 60)
+    saha.master(d.code).last_command_at = _time.monotonic()
+    saha.oku(d)
+    assert saha.master(d.code).shutdown_sayisi == 0, "ucustaki komut varken oturum yikildi"
+
+
+def test_yari_acik_tespiti_continuous_cihaza_uygulanmaz(saha) -> None:
+    d = saha.cihaz("BOOST-2", ip_endpoint_type="listening", session_policy="continuous")
+    _online_yap(saha, d)
+    _linki_yaslandir(saha, d.code, ESIK + 60)
+    saha.oku(d)
+    assert saha.reader.recovery_stats()["smart_half_open_total"] == 0

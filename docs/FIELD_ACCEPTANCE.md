@@ -486,7 +486,7 @@ etiketleriyle imaj yayinlar.
 ```bash
 gh workflow run release-image.yml --ref <dal-adi>
 # sonra:
-docker pull ghcr.io/enerjione/enerjione-grid-dnp3-gateway:sha-<kisa7>
+docker pull ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:sha-<kisa7>
 ```
 
 ### ADIM 1 — Yakalama

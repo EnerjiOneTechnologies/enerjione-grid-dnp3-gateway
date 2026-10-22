@@ -71,7 +71,7 @@ ARG DNP3_LIBRARY
 
 LABEL org.opencontainers.image.title="enerjione-dnp3-gateway" \
       org.opencontainers.image.vendor="Form Elektrik" \
-      org.opencontainers.image.source="https://github.com/enerjione/enerjione-grid-dnp3-gateway" \
+      org.opencontainers.image.source="https://github.com/EnerjiOneTechnologies/enerjione-grid-dnp3-gateway" \
       org.opencontainers.image.description="EnerjiOne DNP3 master gateway: telemetry collection -> NATS JetStream"
 
 ENV PIP_NO_CACHE_DIR=1 \

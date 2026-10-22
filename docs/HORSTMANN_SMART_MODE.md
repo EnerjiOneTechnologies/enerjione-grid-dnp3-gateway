@@ -541,19 +541,39 @@ gonderiyor demektir ve Horstmann'in hareketsizlik sayaci **asla dolamaz**.
 | `smart_max_silence_sec` | backend, cihaz basina | `null` (= ezme yok) | Sessizlik esigi, **60..2592000** sn. Gecersizse yok sayilir, env yedegine dusulur. |
 | `dial_in_interval_min` | backend, cihaz basina | `null` (= `late` KAPALI) | Beklenen zamanlanmis rapor araligi, **60..1440** dk. `late` erken uyarisini besler; `comm_lost` URETMEZ. |
 | `smart_listen_reconnect_max_sec` | backend, cihaz basina | `null` (= kutuphane varsayilani) | `listening` kanalda yeniden baglanma TAVANI, **5..600** sn. Cihazin uyanisinin en gec ne kadar sonra fark edilecegini belirler. |
+| `DNP3_SMART_HALF_OPEN_SEC` | gateway `.env` | `900` | **Yari-acik oturum esigi (1.16.0).** Link acik ve son DNP3 kaniti bu kadar saniyeden eskiyse oturum kapanmis gibi islenir (`smart_half_open_suspected`), yalnizca o cihazin master'i yeniden kurulur. Cihaza hicbir sey gonderilmez. Kabul: `0` (kapali) veya `120..86400`. |
 | `DNP3_SMART_MAX_SILENCE_SEC` | gateway `.env` | `0` (kapali) | Cihaz ezmesi yokken kullanilan yedek. Kabul: **`0` veya `60..2592000`**; `1..59` boot'ta REDDEDILIR. |
-| `DNP3_TIME_SYNC` | gateway `.env` | `lan` | Zaman senkronizasyon **proseduru**: `lan` \| `nonlan` \| `none`. **Horstmann filosunda `nonlan` VERIN** — bkz. §6b. Gecersiz deger boot'ta REDDEDILIR. |
+| `DNP3_TIME_SYNC` | gateway `.env` | `nonlan` (1.16.0) | Zaman senkronizasyon **proseduru**: `lan` \| `nonlan` \| `none`. Horstmann icin dogru deger `nonlan` — bkz. §6b. Gecersiz deger boot'ta REDDEDILIR. |
 
 Politikanin kendisi icin **env anahtari yoktur**: karar cihaz basinadir ve
 kurulum geneli bir bayrakla verilemez.
 
 ---
 
-## 6b. Zaman senkronizasyonu — `DNP3_TIME_SYNC=nonlan` (1.15.1)
+## 6b. Zaman senkronizasyonu — `DNP3_TIME_SYNC=nonlan` (1.15.1, 1.16.0)
 
 ### Ozet
 
-Horstmann filosunda calisan gateway'lerde **`DNP3_TIME_SYNC=nonlan`** verin.
+Horstmann filosunda dogru deger **`DNP3_TIME_SYNC=nonlan`**dir ve 1.16.0'dan
+beri **varsayilandir**.
+
+### 1.16.0 kok neden: cihaza 1970-01-01 yaziliyordu
+
+1.15.1 ve oncesinde `IMasterApplication.Now()` `opendnp3.DNPTime`
+donduruyordu. Binding (`python/src/master.cpp`) `UTCTimestamp` bekler; iki tip
+arasinda donusum yoktur ve cast hatasi **sessizce** yutulup `UTCTimestamp(0)`
+kullanilir. Kutuphane degeri kontrol etmeden yazar. Sonuc: her NEED_TIME'da
+cihaza **1970-01-01 00:00:00.000 UTC** yazildi. Sahadaki belirti buydu: cihaz
+saati 00:00'a donuyor, Dial-In yalnizca ilk slotta (00:59 UTC) calisiyor,
+baska Dial-In saatlerine hic ulasilmiyordu.
+
+1.16.0'da `Now()` her zaman `UTCTimestamp(gercek UTC)` doner ve asla istisna
+sizdirmaz. Her yazim `dnp3_time_sync_write device=.. value=<ISO UTC>
+method=nonlan` ile loglanir; cihazin kabulu `dnp3_time_sync_ok` ile.
+
+**Dial-In hatirlatmasi:** cihaz "Dial-In Hour" degerini **UTC** yorumlar
+(00:59 UTC = 03:59 TR). "Enable Dial-In Settings" kapaliysa saat/dakika
+ayari hic kullanilmaz.
 
 ```yaml
 # docker/compose.yml
@@ -590,11 +610,14 @@ senkronizasyon basarisiz olur ve saat yanlis kalir.
 G50V3 ise **ilan edilmemis**. Dolayisiyla `nonlan` her iki varsayim altinda
 da guvenlidir; `lan` yalnizca dogrulanmamis bir varsayim altinda guvenlidir.
 
-### Neden varsayilan degismedi
+### Varsayilan neden `nonlan` oldu (1.16.0)
 
-Varsayilan **`lan` olarak kaldi**. Varsayilani degistirmek, Horstmann
-olmayan **her** kurulumun prosedurunu degistirirdi — bu bir bakim
-paketinin isi degildir. Secim acik yapilandirmayla yapilir.
+1.15.1'de varsayilan `lan` birakilmisti. Filonun tamami Horstmann oldugu ve
+`.env`te deger vermeyen kurulumlar cihaz saatini hic duzeltemedigi icin
+1.16.0'da varsayilan **`nonlan`** oldu. `lan` acikca secilebilir; Horstmann
+profilli bir cihazda (`signal_profile` `horstmann*` ya da politika
+`smart`/`auto`) secilirse yalnizca `dnp3_time_sync_lan_on_horstmann` WARNING'i
+loglanir, secim degismez.
 
 ### Neden model bazli otomatik secim YOK
 
@@ -621,8 +644,15 @@ yapilandirmadir**.
 * **Zorla senkronizasyon YOK.** Master yalnizca cihaz **IIN1.4 (NEED_TIME)**
   assert ettiginde saat yazar. Saat yanlis olup NEED_TIME gelmiyorsa
   gateway yalnizca **gorunur kilar** (`device_clock_status = "invalid"`).
-* **ClockGuard degismedi.** Gateway kendi saatinden emin degilse (RTC/NTP
-  dogrulanmamis) istense bile yazmaz.
+* **ClockGuard gercekten yazimi engelliyor (1.16.0).** Gateway saati
+  backend'e karsi dogrulanmamis ya da sapmis iken master `timeSyncMode=None`
+  ile kurulur; zaman gorevi hic olusmaz. Saat guvenli olunca master yeniden
+  kurulur (`dnp3_time_sync_master_rebuild`); acik bir Smart oturumu varsa bu
+  acilis oturum kapanana kadar ertelenir (`dnp3_time_sync_enable_deferred`).
+  1.15.1'de koruma `Now()` icinde "gecersiz zaman" donerek yapiliyordu ve
+  **calismiyordu**: o deger de 1970 olarak yaziliyordu. Sapma 2-30 sn
+  arasindaysa (koruma `safe`) yazilan deger backend saatine gore duzeltilir;
+  `unsafe` -> `safe` donusu histerezislidir (< 25 sn).
 * **Smart sessizlik degismezi degismedi** (§5c): periyodik tarama yok,
   60sn link keepalive yok, modem uyandirma yok.
 
@@ -634,7 +664,8 @@ sunlarin **hepsi** gorulmelidir:
 1. Cihazdan `IIN1.4 = 1` (NEED_TIME),
 2. Gateway'den **FC=23** DELAY MEASUREMENT,
 3. Gateway'den **G50V1** WRITE,
-4. Cihaz RTC'sinin duzelmesi (or. 2066 → 2026),
+4. G50V1 WRITE'taki 6 baytlik degerin gercek UTC olmasi (2026 icin son iki
+   bayt tipik olarak `A1 01`; **`00 00` ASLA**) ve cihaz RTC'sinin duzelmesi,
 5. Sonraki yanitlarda `IIN1.4 = 0`.
 
 ---

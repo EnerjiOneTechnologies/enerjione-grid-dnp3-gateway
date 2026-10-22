@@ -148,7 +148,7 @@ def test_uretim_compose_ciktisi_version_ile_pinli():
 
 def test_acik_image_parametresi_hala_calisiyor():
     """Digest ile daha kati pin isteyen kurulumlar engellenmemeli."""
-    digest = "ghcr.io/enerjione/enerjione-grid-dnp3-gateway@sha256:" + "a" * 64
+    digest = "ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway@sha256:" + "a" * 64
     assert _imaj_satiri(_render(image=digest)) == digest
 
 

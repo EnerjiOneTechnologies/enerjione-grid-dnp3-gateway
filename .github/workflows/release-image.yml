@@ -43,7 +43,11 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # Sabit ve kucuk harf: depo 2026-10-22'de EnerjiOneTechnologies org'una
+  # tasindi; `github.repository` artik buyuk harf iceriyor ve Docker imaj adi
+  # buyuk harf kabul etmez. 1.15.1 ve oncesi imajlar eski adreste kalir:
+  # ghcr.io/enerjione/enerjione-grid-dnp3-gateway
+  IMAGE_NAME: enerjionetechnologies/enerjione-grid-dnp3-gateway
 
 jobs:
   # KAPI: testler + lint gecmeden imaj yayinlanmaz.
