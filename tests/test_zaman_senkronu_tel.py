@@ -124,7 +124,14 @@ class _YakalayanProxy:
         except OSError:
             pass
         finally:
+            # shutdown() SART: Linux'ta baska bir thread'in recv'de bekledigi
+            # soketi close() etmek FIN GONDERMEZ ve o recv'i uyandirmaz; cihaz
+            # kopusu hic gormez (Windows'ta close yeterliydi, CI'da yakalandi).
             for s in (kaynak, hedef):
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
                 try:
                     s.close()
                 except OSError:
