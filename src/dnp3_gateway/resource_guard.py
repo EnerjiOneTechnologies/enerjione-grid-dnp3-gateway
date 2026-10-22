@@ -48,8 +48,15 @@ DISK_WARN_BYTES = 1024 * 1024 * 1024  # 1 GB  -> /health degraded
 DISK_CRITICAL_BYTES = 256 * 1024 * 1024  # 256 MB -> yeni yayin durdurulur
 
 # Saat sapmasi esikleri (saniye).
-CLOCK_WARN_SKEW_SEC = 2.0  # /health degraded
+#: /health degraded. Bu esigin ustunde DNP3'e yazilan zaman backend saatine
+#: gore DUZELTILIR (`time.time() - skew`): sapmis host saati cihaza yazilmaz.
+CLOCK_WARN_SKEW_SEC = 2.0
 CLOCK_UNSAFE_SKEW_SEC = 30.0  # DNP3 zaman yazimi durdurulur
+#: `unsafe`ten `safe`e donus esigi (HISTEREZIS, 1.16.0). `Date` basligi saniye
+#: cozunurluklu oldugu icin olcum ~1 sn oynar. Histerezis olmasa 30 sn
+#: civarinda gidip gelen bir sapma, her geciste TUM DNP3 master'larini
+#: yeniden kurdururdu (zaman senkronu master kurulurken uygulanir).
+CLOCK_SAFE_RECOVER_SKEW_SEC = 25.0
 
 
 class DiskGuard:
@@ -123,6 +130,8 @@ class ClockGuard:
         self._skew_sec: float | None = None
         self._checked_at: float | None = None
         self._warned_level: str | None = None
+        #: Histerezisli `unsafe` karari (bkz. CLOCK_SAFE_RECOVER_SKEW_SEC).
+        self._guvensiz = False
 
     def observe_http_date(self, header_value: str | None) -> None:
         """Backend yanitindaki `Date` basligindan sapmayi hesapla."""
@@ -143,11 +152,19 @@ class ClockGuard:
         with self._lock:
             self._skew_sec = skew
             self._checked_at = time.time()
+            if abs(skew) >= CLOCK_UNSAFE_SKEW_SEC:
+                self._guvensiz = True
+            elif abs(skew) < CLOCK_SAFE_RECOVER_SKEW_SEC:
+                self._guvensiz = False
         self._maybe_log(skew)
 
     def _maybe_log(self, skew: float) -> None:
         magnitude = abs(skew)
-        if magnitude >= CLOCK_UNSAFE_SKEW_SEC:
+        with self._lock:
+            guvensiz = self._guvensiz
+        # `unsafe` logu histerezisli karari izler: "DURDURULDU" dedigi an
+        # adapter'in gercekten durdurdugu andir.
+        if guvensiz:
             level = "unsafe"
         elif magnitude >= CLOCK_WARN_SKEW_SEC:
             level = "warn"
@@ -172,18 +189,28 @@ class ClockGuard:
             logger.info("clock_skew_recovered skew_sec=%.1f", skew)
 
     @property
+    def skew_sec(self) -> float | None:
+        """Son olculen sapma (gateway - backend, saniye); olcum yoksa None."""
+        with self._lock:
+            return self._skew_sec
+
+    @property
     def clock_state(self) -> str:
         """`unknown` | `safe` | `unsafe`.
 
         `unknown`, `unsafe`ten AYRI tutulur: ikisi de saat yazmayi engeller
         ama sebepleri farklidir ve operatorun gordugu sey farkli olmali —
         "saatin sapmis" ile "saatini henuz dogrulayamadim" ayni sey degildir.
+
+        HISTEREZIS (1.16.0): sapma >= CLOCK_UNSAFE_SKEW_SEC olunca `unsafe`;
+        yeniden `safe` icin < CLOCK_SAFE_RECOVER_SKEW_SEC gerekir.
         """
         with self._lock:
             skew = self._skew_sec
+            guvensiz = self._guvensiz
         if skew is None:
             return "unknown"
-        return "safe" if abs(skew) < CLOCK_UNSAFE_SKEW_SEC else "unsafe"
+        return "unsafe" if guvensiz else "safe"
 
     @property
     def is_safe_for_time_sync(self) -> bool:
@@ -205,9 +232,15 @@ class ClockGuard:
         Backend'e ulasilabildigi anda ilk `Date` basligi durumu netlestirir;
         o ana kadar yazmamak, yanlis saati 300 cihaza yazmaktan iyidir.
 
-        KAPSAM: bu bayrak YALNIZCA DNP3 saat yazmayi (`Now()` -> DNPTime)
-        kapatir. Boot, onbellekli config, DNP3 baglanti/polling, telemetri,
-        NATS/outbox, health ve komut akisi (F1-F7) ETKILENMEZ.
+        KAPSAM: bu bayrak YALNIZCA DNP3 saat yazmayi kapatir. Boot,
+        onbellekli config, DNP3 baglanti/polling, telemetri, NATS/outbox,
+        health ve komut akisi (F1-F7) ETKILENMEZ.
+
+        NASIL KAPATIR (1.16.0): adapter master'i bu bayrak False iken
+        `timeSyncMode=None` ile kurar (`_etkin_zaman_senkronu`) ve bayrak
+        degisince master'i yeniden kurar. 1.15.1'e kadar bayrak `Now()`da
+        tuketiliyor ve "gecersiz zaman" donuluyordu; kutuphane o degeri
+        kontrol etmeden yazdigi icin bu cihaza 1970-01-01 YAZDIRIYORDU.
         """
         return self.clock_state == "safe"
 

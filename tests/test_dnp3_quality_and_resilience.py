@@ -384,6 +384,9 @@ def test_baglanti_imzasi_ip_degisince_farklidir() -> None:
         # Oturum politikasi da imzanin parcasi (G-SMART-01): degisirse
         # master'in yeniden kurulmasi GEREKIR.
         _session_policy = staticmethod(Yadnp3TelemetryReader._session_policy)
+        # Uygulanan zaman senkronu da imzanin parcasi (1.16.0): saat korumasi
+        # durumu degisince master yeniden kurulur.
+        _time_sync = "nonlan"
 
     r = _R()
     eski = DeviceConfig(code="D1", name="d", ip_address="10.20.5.11", dnp3_address=4)
@@ -574,8 +577,8 @@ def test_production_dnp3_modu_kabul_eder(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("BACKEND_API_URL", "https://api.enerjione.local/api/v1")
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.is_dnp3_mode is True
-    # Yeni ayarlarin varsayilanlari
-    assert s.dnp3_time_sync == "lan"
+    # Yeni ayarlarin varsayilanlari (zaman senkronu 1.16.0'dan beri nonlan)
+    assert s.dnp3_time_sync == "nonlan"
     assert s.dnp3_publish_quality_flags is False  # backend hazir olunca acilacak
 
 

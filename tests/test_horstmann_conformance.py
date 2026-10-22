@@ -162,6 +162,9 @@ class _ZamanIsteyenOutstation(opendnp3.IOutstationApplication):
         super().__init__()
         self.need_time = True
         self.yazilan_zamanlar: list[int] = []
+        #: Her yazimin ALINDIGI an (host saati, ms) — yazilan degerin
+        #: gercek UTC oldugunu kanitlamak icin.
+        self.yazim_anlari: list[float] = []
 
     def GetApplicationIIN(self):  # noqa: N802 — kutuphane imzasi
         iin = opendnp3.ApplicationIIN()
@@ -172,6 +175,7 @@ class _ZamanIsteyenOutstation(opendnp3.IOutstationApplication):
         return True
 
     def WriteAbsoluteTime(self, ms):  # noqa: N802 — kutuphane imzasi
+        self.yazim_anlari.append(time.time() * 1000)
         self.yazilan_zamanlar.append(int(getattr(ms, "msSinceEpoch", ms)))
         # GERCEK SENKRONIZASYON OLDU -> ancak SIMDI clear.
         self.need_time = False
@@ -276,11 +280,20 @@ def _time_sync_kosusu(mode: str, timeout: float = 30.0):
     `cfg.master.timeSyncMode = X` GORMEK KANIT DEGILDIR (review §15) — bu
     kosucu master'i gercekten ayaga kaldirir, cerceveleri proxy'de yakalar
     ve outstation'in `WriteAbsoluteTime` geri cagrisini gozler.
+
+    Master uygulamasi GATEWAY'IN KENDISIDIR (`_make_master_app`). 1.15.1'e
+    kadar burada `Now()`u override etmeyen bir test sinifi vardi; binding
+    "pure virtual" yoluna dusup 0 yaziyordu ve yazilan deger HIC assert
+    edilmedigi icin cihaza 1970 gittigi gorulmedi.
     """
     proxy = _Proxy()
     os_app = _ZamanIsteyenOutstation()
     os_mgr = opendnp3.DNP3Manager(2)
     mgr = opendnp3.DNP3Manager(2)
+    # Saat korumasi bu kosucunun konusu degil (bkz. test_zaman_senkronu_tel):
+    # guard yokken `Now()` host saatini doner.
+    onceki_guard = mod._clock_guard_ref.get("guard")
+    mod._clock_guard_ref["guard"] = None
     try:
         os_ch = os_mgr.AddOutstationTCPClient(
             "osch",
@@ -299,10 +312,6 @@ def _time_sync_kosusu(mode: str, timeout: float = 30.0):
             def __init__(self) -> None:
                 super().__init__()
 
-        class _App(opendnp3.IMasterApplication):
-            def __init__(self) -> None:
-                super().__init__()
-
         ch = mgr.AddTCPClient(
             "m",
             opendnp3.levels.NORMAL,
@@ -317,7 +326,9 @@ def _time_sync_kosusu(mode: str, timeout: float = 30.0):
         cfg.master.disableUnsolOnStartup = False
         # URETIM YOLUNUN TA KENDISI — testte elle enum set EDILMEZ.
         mod._ManagedMaster._apply_time_sync(cfg, mode)
-        ch.AddMaster("mm", _SOE(), _App(), cfg).Enable()
+        # pybind11 sahiplik ALMAZ: uygulama nesnesi kosu boyunca canli tutulur.
+        app = mod._make_master_app(mod._DeviceCache(), "SN2-UYUM")
+        ch.AddMaster("mm", _SOE(), app, cfg).Enable()
 
         son = time.monotonic() + timeout
         while time.monotonic() < son and not os_app.yazilan_zamanlar:
@@ -332,6 +343,15 @@ def _time_sync_kosusu(mode: str, timeout: float = 30.0):
                 kapat()
             except Exception:  # noqa: BLE001
                 pass
+        mod._clock_guard_ref["guard"] = onceki_guard
+
+
+def _yazilan_gercek_utc(os_app) -> None:
+    """Cihaza yazilan HER deger, alindigi andaki gercek UTC'ye 2 sn icinde (ASLA 1970)."""
+    assert os_app.yazilan_zamanlar
+    for ms, an in zip(os_app.yazilan_zamanlar, os_app.yazim_anlari, strict=True):
+        assert ms >= mod._GECERLI_ZAMAN_ALT_SINIR_MS, f"cihaza {ms} ms (1970/2001 oncesi) YAZILDI"
+        assert abs(ms - an) <= 2_000, f"yazilan {ms} gercek UTC degil (alindigi an {an:.0f})"
 
 
 def _fc_kumesi(cerceveler) -> set[int]:
@@ -353,6 +373,8 @@ def test_z_aa_g50v1_time_sync_ve_iin14_sync_before_clear() -> None:
 
     # --- API SEVIYESI KANIT: geri cagri TETIKLENDI ---
     assert os_app.yazilan_zamanlar, "master NEED_TIME'a ragmen saat YAZMADI — time sync calismiyor"
+    # --- DEGER KANITI: yazilan zaman gercek UTC (1.15.1'de 1970 idi) ---
+    _yazilan_gercek_utc(os_app)
 
     # --- SYNC-BEFORE-CLEAR (AA) ---
     # `need_time` YALNIZCA `WriteAbsoluteTime` icinde temizleniyor; yani
@@ -386,8 +408,9 @@ def test_ab_nonlan_fc23_ve_g50v1_ile_senkronize_eder() -> None:
     """
     os_app, cerceveler = _time_sync_kosusu("nonlan")
 
-    # 1) API kaniti: saat GERCEKTEN yazildi.
+    # 1) API kaniti: saat GERCEKTEN yazildi — ve yazilan deger GERCEK UTC.
     assert os_app.yazilan_zamanlar, "nonlan prosedurunde NEED_TIME'a ragmen saat YAZILMADI"
+    _yazilan_gercek_utc(os_app)
 
     # 2) FC=23 DELAY MEASUREMENT tel uzerinde.
     fclar = _fc_kumesi(cerceveler)
@@ -506,9 +529,8 @@ def test_z_g50_varyasyonu_profille_karsilastirilir() -> None:
     da GUVENLIDIR; `LAN` yalnizca dogrulanmamis varsayim altinda guvenlidir.
 
     COZUM (1.15.1): `DNP3_TIME_SYNC` `lan | nonlan | none` olarak
-    genisletildi ve Horstmann kurulumlarinda `nonlan` verilmesi dokumante
-    edildi. GENEL VARSAYILAN `lan` KALDI — varsayilani degistirmek Horstmann
-    olmayan her kurulumun prosedurunu degistirirdi. Model bazli otomatik
+    genisletildi. 1.16.0: VARSAYILAN `nonlan` oldu (filonun tamami Horstmann;
+    `lan` varsayilani cihaz saatini hic duzeltemiyordu). Model bazli otomatik
     secim YAPILMADI: `DeviceConfig`te kanonik `model` alani yok, `signal_profile`
     ise sozlesme geregi gateway tarafindan ANLAMLANDIRILMAZ; ona bakmak bir
     string heuristic'i olurdu.

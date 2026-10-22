@@ -24,6 +24,7 @@ import logging
 import math
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, ClassVar
 
 from dnp3_gateway import network_probe
@@ -50,6 +51,7 @@ from dnp3_gateway.operation_mode import (
     normalize_operation_mode,
     resolve_master_operation_mode_signal,
 )
+from dnp3_gateway.resource_guard import CLOCK_WARN_SKEW_SEC
 from dnp3_gateway.session_state_store import SessionStateRecord, SessionStateStore
 
 logger = logging.getLogger(__name__)
@@ -396,6 +398,24 @@ _LOST_RELINK_BACKOFF_MAX_SEC = 3600.0
 # cevap alamadan olur ve sonuc `CommandStatus.UNDEFINED` doner. Poll thread'i
 # ile komut yolu arasinda baska bir koordinasyon yok.
 _LOST_RELINK_COMMAND_GRACE_SEC = 60.0
+
+# YARI-ACIK SMART OTURUMU (1.16.0)
+# --------------------------------
+# Smart'ta link keepalive ve periyodik tarama BILEREK kapali: gateway hicbir
+# sey gondermez. 4G hatti FIN'siz duserse (modem kapanir, RRC kaybolur) soket
+# gateway tarafinda ESTABLISHED kalir, opendnp3 `OnClose` cagirmaz ve cihaz
+# SURESIZ `online` gorunur — bayatlik kurali, kopuk cihaz yoklamasi ve
+# sessizlik denetimi bagli Smart oturumda calismaz. Listening'de daha da
+# kotu: gateway "bagliyim" sandigi icin cihaz uyandiginda YENIDEN BAGLANMAZ.
+# Sahada "restart duzeltiyor" diye gorulen buydu.
+#
+# Saglikli bir Horstmann Smart oturumu 15 sn bosta kalinca kapanir; 900 sn
+# boyunca hem link acik hem HIC kanit yoksa oturum olu kabul edilir.
+# `DNP3_SMART_HALF_OPEN_SEC` ile degistirilir; 0 = kapali.
+_SMART_HALF_OPEN_SEC = 900
+#: Zaman senkronu acilisi, yalnizca KANIT ureten (canli) bir Smart oturumu
+#: icin ertelenir. Bu sureden eski kanit = oturum fiilen bitmis.
+_ZAMAN_ACILIS_ERTELEME_MAX_SEC = 120.0
 
 # BAYATLIK ESIGI — "bu sure boyunca hic ses cikmadiysa gercekten kopuktur".
 # Cok agresif olursa baseline scan'in dogal jitter'inde bile false comm_lost
@@ -1747,32 +1767,152 @@ def _saat_uyarisi_ver(device_code: str) -> bool:
         return True
 
 
-def _gecersiz_dnptime() -> Any:
-    """opendnp3'e "bu zaman gecerli degil" diyen bir DNPTime uretir.
+def _saat_uyarisini_sifirla(device_code: str) -> bool:
+    """Zaman yazimi yeniden acildi: bir sonraki askiya alma yine loglansin.
 
-    Binding surumleri arasinda API farkli olabildigi icin sirayla deneriz:
-      1. `DNPTime(0, TimestampQuality.INVALID)` — acik ve dogru olan.
-      2. `DNPTime(0)` — epoch 0; outstation'lar bunu makul bir saat olarak
-         kabul etmez, pratikte yazim etkisiz kalir.
-    Hicbiri kurulamazsa None doneriz; opendnp3 tarafinda bu da yazimi engeller.
+    Donen: cihaz daha once askiya alinmis miydi (yeniden acilis logu icin).
     """
-    kalite_cls = getattr(opendnp3, "TimestampQuality", None)
-    if kalite_cls is not None:
-        for ad in ("INVALID", "Invalid", "NOT_SYNCHRONIZED"):
-            kalite = getattr(kalite_cls, ad, None)
-            if kalite is not None:
-                try:
-                    return opendnp3.DNPTime(0, kalite)
-                except Exception:  # noqa: BLE001
-                    break
+    with _saat_uyari_lock:
+        if device_code not in _saat_uyarilan:
+            return False
+        _saat_uyarilan.discard(device_code)
+        return True
+
+
+# ---- ZAMAN YAZIMI DEGISMEZLERI (1.16.0) ------------------------------------
+#
+# KOK NEDEN (sahada olculdu, 1.15.1 ve oncesi): `Now()` `opendnp3.DNPTime`
+# donduruyordu. Binding'in trampolini (`python/src/master.cpp`,
+# PyMasterApplication::Now) `UTCTimestamp` bekler; iki tip arasinda
+# implicit donusum YOKTUR. Cast hatasi (`pybind11::cast_error`, bir
+# `std::exception`) SESSIZCE yutulur ve trampolin `UTCTimestamp(0)` doner.
+# Kutuphane (`SerialTimeSyncTask` / `LANTimeSyncTask`) degeri HIC kontrol
+# etmeden yazar. Sonuc: her NEED_TIME'da cihaza 1970-01-01 00:00:00.000 UTC
+# yazildi; cihaz saati 00:00'a dondu ve Dial-In yalnizca ilk slotta (00:59)
+# calisti.
+#
+# Ayni yol `Now()` icindeki HER Python istisnasi icin de gecerlidir:
+# istisna -> 0. Bu yuzden `Now()` hicbir kosulda istisna SIZDIRMAZ ve
+# donus tipi HER ZAMAN `UTCTimestamp`tir.
+#
+# `Now()` YAZIMI VETO EDEMEZ: `UTCTimestamp`in kalite alani yoktur ve
+# kutuphane degeri dogrulamaz. "Saat guvensizken yazma" karari bu yuzden
+# `Now()`da DEGIL, master KURULURKEN verilir (`_etkin_zaman_senkronu`):
+# guvensiz saatte master `timeSyncMode=None` ile kurulur ve zaman gorevi
+# HIC olusmaz.
+
+#: 2001-01-01T00:00:00Z. Bundan eski bir deger asla gecerli bir saat degildir.
+_GECERLI_ZAMAN_ALT_SINIR_MS = 978_307_200_000
+#: Cihaza yazilan deger ile gateway'in gercek UTC tahmini arasindaki azami fark.
+_ZAMAN_YAZMA_TOLERANS_MS = 5_000
+#: Zaman senkronu gorev tipleri (opendnp3 `MasterTaskType` adlari, OLCULDU).
+_ZAMAN_GOREVLERI: dict[str, str] = {"NON_LAN_TIME_SYNC": "nonlan", "LAN_TIME_SYNC": "lan"}
+
+
+def _iso_utc(ms: int) -> str:
     try:
-        return opendnp3.DNPTime(0)
+        return (
+            datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc).isoformat(timespec="milliseconds")
+        ).replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return f"gecersiz({ms})"
+
+
+def _saat_tahmini_ms() -> tuple[int, str]:
+    """Gateway'in gercek UTC icin ELDEKI EN IYI tahmini: `(ms, kaynak)`.
+
+    ASLA istisna atmaz.
+
+        guard yok                          -> host saati           (`host`)
+        sapma < CLOCK_WARN_SKEW_SEC (2 sn)  -> host saati           (`host`)
+        sapma >= 2 sn (safe ya da unsafe)   -> host - olculen sapma (`backend_duzeltilmis`)
+        guard `unknown` / hata             -> host saati           (`host_dogrulanmamis`)
+
+    NEDEN 2 SN'DE DUZELTME: koruma 30 sn'ye kadar sapmayi `safe` sayar;
+    host saati oldugu gibi yazilsaydi 2..30 sn sapmis bir saat cihaza
+    gidecekti — "gercek UTC'den +-5 sn" degismezini cigner. Korumanin
+    kendisi backend saatine guvenme varsayimi uzerine kuruludur; `Date`
+    basligi saniye cozunurluklu oldugu icin duzeltmenin hatasi ~1 sn'dir.
+    2 sn'nin altinda host saati daha hassastir ve oldugu gibi kullanilir.
+
+    `unsafe` ve `unknown`da bu deger NORMALDE KULLANILMAZ — master zaman
+    gorevi olmadan kurulur. Yalnizca durum degisimi ile master'in yeniden
+    kurulmasi arasindaki kisa pencerede devreye girer.
+    """
+    simdi = time.time()
+    guard = _clock_guard_ref.get("guard")
+    if guard is None:
+        return int(simdi * 1000), "host"
+    try:
+        durum = guard.clock_state
+        if durum in ("safe", "unsafe"):
+            sapma = getattr(guard, "skew_sec", None)
+            if sapma is not None and abs(float(sapma)) >= CLOCK_WARN_SKEW_SEC:
+                return int((simdi - float(sapma)) * 1000), "backend_duzeltilmis"
+            if durum == "safe":
+                return int(simdi * 1000), "host"
     except Exception:  # noqa: BLE001
-        return None
+        logger.debug("clock_guard_check_failed", exc_info=True)
+    return int(simdi * 1000), "host_dogrulanmamis"
+
+
+def _etkin_zaman_senkronu(yapilandirilan: str) -> tuple[str, str]:
+    """Master'a UYGULANACAK prosedur ve sebebi: `(lan|nonlan|none, saat_durumu)`.
+
+    Saat korumasi `safe` degilse prosedur `none` olur: kutuphane zaman
+    gorevini HIC kurmaz ve cihaza hicbir deger yazilmaz. Bu, `Now()`un
+    yapamadigi vetonun TEK gercek yoludur.
+
+    Guard yoksa (adapter main.py disinda kullaniliyor) yapilandirilan
+    prosedur aynen uygulanir — eski davranis.
+    """
+    istenen = (yapilandirilan or "nonlan").strip().lower()
+    if istenen == "none":
+        return "none", "-"
+    guard = _clock_guard_ref.get("guard")
+    if guard is None:
+        return istenen, "-"
+    try:
+        durum = str(guard.clock_state)
+        guvenli = bool(guard.is_safe_for_time_sync)
+    except Exception:  # noqa: BLE001
+        logger.debug("clock_guard_check_failed", exc_info=True)
+        return "none", "unknown"
+    return (istenen if guvenli else "none"), durum
+
+
+def _horstmann_profilli_mi(device: Any) -> bool:
+    """YALNIZCA UYARI ICIN — prosedur SECIMI bu heuristige BAGLANMAZ.
+
+    `signal_profile` backend'in cihaz modeli anahtaridir (`horstmann_sn_2_0`
+    vb.); `smart`/`auto` politikalari zaten yalnizca Horstmann Smart Mode
+    icin vardir. Yanlis pozitif yalnizca fazladan bir WARNING satiridir.
+    """
+    profil = (getattr(device, "signal_profile", "") or "").strip().lower()
+    politika = (getattr(device, "session_policy", "") or "").strip().lower()
+    return profil.startswith("horstmann") or politika in ("smart", "auto")
 
 
 def _iin_bit(iin: Any, *names: str) -> bool:
-    """IIN nesnesinden bir bayragi oku; binding surumune gore isim degisebilir."""
+    """IIN nesnesinden bir bayragi oku; binding surumune gore isim degisebilir.
+
+    OLCULDU (yadnp3 3.2.1.1): `IINField` bayraklari bool ozellik olarak
+    VERMEZ; `IsSet(IINBit.<AD>)` sunar ve `LSB`/`MSB` tamsayidir. 1.15.1'e
+    kadar yalnizca asagidaki ozellik aramasi vardi ve bu binding'de HER ZAMAN
+    False donuyordu: NEED_TIME, DEVICE_RESTART ve EVENT_BUFFER_OVERFLOW
+    gateway'de hic gorunmuyordu (`dnp3_need_time` logu, `need_time_iin`,
+    `device_clock_status=need_time`).
+    """
+    is_set = getattr(iin, "IsSet", None)
+    bit_cls = getattr(opendnp3, "IINBit", None) if _YADNP3_AVAILABLE else None
+    if callable(is_set) and bit_cls is not None:
+        for name in names:
+            bit = getattr(bit_cls, name, None)
+            if bit is not None:
+                try:
+                    return bool(is_set(bit))
+                except Exception:  # noqa: BLE001
+                    break
     for name in names:
         val = getattr(iin, name, None)
         if isinstance(val, bool):
@@ -1882,6 +2022,11 @@ def _make_master_app(
     class _MasterApp(opendnp3.IMasterApplication):  # type: ignore[misc]
         def __init__(self) -> None:
             super().__init__()
+            # Calisan zaman senkronu gorevinin `Now()` cagri dizisi. opendnp3
+            # bu callback'leri master'in TEK strand'inden cagirir; gorev
+            # bitene kadar baska gorev kosmaz (BlocksLowerPriority) — kilit
+            # gerekmez. None = zaman gorevi yok.
+            self._zaman_gorevi: dict[str, Any] | None = None
 
         def OnReceiveIIN(self, iin):  # noqa: N802
             # IIN yalnizca outstation'in GERCEK bir uygulama yanitiyla gelir —
@@ -1900,7 +2045,16 @@ def _make_master_app(
                 logger.debug("yadnp3_iin_report_error device=%s", device_code, exc_info=True)
 
         def OnTaskStart(self, type, id):  # noqa: N802, A002
-            pass
+            # Yalnizca ZAMAN gorevleri izlenir: `Now()` cagrilarinin hangi
+            # adima ait oldugunu (baslangic / gecikme olcumu / yazma) bilmek
+            # icin. opendnp3 her deneme basinda burayi cagirir ve gorevi
+            # sifirlar (`Initialize`), yani dizi her denemede bastan baslar.
+            try:
+                yontem = _ZAMAN_GOREVLERI.get(getattr(type, "name", str(type)).rsplit(".", 1)[-1])
+                if yontem is not None:
+                    self._zaman_gorevi = {"yontem": yontem, "cagrilar": []}
+            except Exception:  # noqa: BLE001
+                logger.debug("yadnp3_task_start_error device=%s", device_code, exc_info=True)
 
         def OnTaskComplete(self, info):  # noqa: N802
             # ESKIDEN `pass` IDI. Tamamlanan her gorev cihazin cevap verip
@@ -1914,8 +2068,27 @@ def _make_master_app(
             # sizmamali.
             try:
                 sonuc = getattr(info, "result", None)
-                if getattr(sonuc, "name", str(sonuc)) == "SUCCESS":
+                sonuc_adi = getattr(sonuc, "name", str(sonuc))
+                if sonuc_adi == "SUCCESS":
                     cache.note_evidence()
+                tip = getattr(info, "type", None)
+                yontem = _ZAMAN_GOREVLERI.get(getattr(tip, "name", str(tip)).rsplit(".", 1)[-1])
+                if yontem is not None:
+                    self._zaman_gorevi = None
+                    if sonuc_adi == "SUCCESS":
+                        logger.info(
+                            "dnp3_time_sync_ok device=%s method=%s — cihaz zaman yazimini kabul etti",
+                            device_code,
+                            yontem,
+                        )
+                    else:
+                        logger.warning(
+                            "dnp3_time_sync_failed device=%s method=%s result=%s — kutuphane "
+                            "NEED_TIME devam ettikce yeniden dener",
+                            device_code,
+                            yontem,
+                            sonuc_adi,
+                        )
             except Exception:  # noqa: BLE001
                 logger.debug("yadnp3_task_complete_error device=%s", device_code, exc_info=True)
 
@@ -1952,56 +2125,130 @@ def _make_master_app(
             return assign_class_during_startup
 
         def Now(self):  # noqa: N802
-            """opendnp3 outstation'a saat yazarken bu degeri kullanir.
+            """opendnp3'un cihaza yazacagi zamanin KAYNAGI. Donus: `UTCTimestamp`.
 
-            SAAT SAPMASI KORUMASI — GERCEK, no-op DEGIL.
-            Bu metod eskiden guard'i kontrol edip yalnizca DEBUG log basiyor,
-            sonra YINE DE `time.time()` donduruyordu; yorumu ise korumanin
-            "_apply_time_sync'te" oldugunu iddia ediyordu — oyle bir mekanizma
-            YOKTU. Yani sapmis gateway saati 300 outstation'a yaziliyordu ve
-            kod bunun onlendigini soyluyordu.
+            DONUS TIPI `UTCTimestamp` OLMAK ZORUNDA — 1.15.1'e kadar `DNPTime`
+            donuyordu ve binding bunu cast EDEMEDIGI icin sessizce
+            `UTCTimestamp(0)` kullaniyordu: cihazlara 1970-01-01 yazildi
+            (bkz. modul ustundeki "ZAMAN YAZIMI DEGISMEZLERI").
 
-            Artik sapma guvensizken `DNPTime` yerine GECERSIZ bir zaman
-            (`is_valid=False` / epoch 0) donduruyoruz: opendnp3 bu durumda
-            outstation'a saat YAZMAZ, cihaz kendi saatinde kalir ve IIN1.4
-            (NEED_TIME) bayragiyla durumu bildirmeye devam eder — ki bu bayrak
-            artik loglaniyor (bkz. _report_iin).
+            BU METOD YAZIMI ENGELLEYEMEZ. Eski docstring "gecersiz zaman
+            donersek opendnp3 yazmaz" diyordu; YANLISTI — kutuphane degeri
+            kontrol etmeden yazar, 0 donerse 1970 yazar. Saat guvensizken
+            yazmama karari master KURULURKEN verilir (`_etkin_zaman_senkronu`
+            -> `timeSyncMode=None`).
 
-            Yanlis saati 300 cihaza yazmak, hic yazmamaktan cok daha kotudur:
-            cihazin kendi olay tamponu da bozulur ve baska bir master'in
-            okudugu damgalar da yanlis olur.
+            Degismezler:
+              * ASLA istisna sizdirmaz (istisna -> binding -> 0 -> 1970).
+              * ASLA 0 / 2001 oncesi bir deger donmez; deger gateway'in
+                gercek UTC tahminidir (`_saat_tahmini_ms`).
+              * Cihaza yazilacak deger gercek UTC tahmininden en fazla
+                `_ZAMAN_YAZMA_TOLERANS_MS` sapar (`_zaman_degeri_ms`).
             """
-            guard = _clock_guard_ref.get("guard")
-            if guard is not None:
-                try:
-                    if not guard.is_safe_for_time_sync:
-                        if _saat_uyarisi_ver(device_code):
-                            # `unknown` ile `unsafe` AYRI raporlanir: ikisi de
-                            # yazmayi engeller ama operatorun yapacagi sey farkli.
-                            durum = getattr(guard, "clock_state", "unsafe")
-                            if durum == "unknown":
-                                logger.warning(
-                                    "dnp3_time_sync_suspended device=%s sebep=clock_unknown — "
-                                    "gateway saati backend'e karsi HENUZ DOGRULANMADI "
-                                    "(soguk acilis / backend erisilemez); outstation'a saat "
-                                    "YAZILMIYOR. Backend'e ilk basarili istekte cozulur. "
-                                    "Telemetri, polling ve komut akisi ETKILENMEZ.",
-                                    device_code,
-                                )
-                            else:
-                                logger.error(
-                                    "dnp3_time_sync_suspended device=%s sebep=clock_unsafe — "
-                                    "gateway saati guvenilmez (sapma esigi asildi); "
-                                    "outstation'a saat YAZILMIYOR. Sunucuda NTP/w32time "
-                                    "servisini kontrol edin.",
-                                    device_code,
-                                )
-                        return _gecersiz_dnptime()
-                except Exception:  # noqa: BLE001
-                    logger.debug("clock_guard_check_failed", exc_info=True)
-            return opendnp3.DNPTime(int(time.time() * 1000))
+            try:
+                return opendnp3.UTCTimestamp(self._zaman_degeri_ms())
+            except Exception:  # noqa: BLE001
+                logger.exception("dnp3_time_sync_now_error device=%s", device_code)
+            try:
+                return opendnp3.UTCTimestamp(int(time.time() * 1000))
+            except Exception:  # noqa: BLE001
+                return None
+
+        def _zaman_degeri_ms(self) -> int:
+            """`Now()` icin deger; adima gore gecikme telafisini sinirlar ve loglar.
+
+            Kutuphanenin OLCULEN cagri dizisi (yadnp3 3.2.1.1 kaynagi):
+
+              nonlan (`SerialTimeSyncTask`):
+                1. FC=23 istegi kurulurken      -> `start`
+                2. FC=23 yaniti islenirken      -> gecikme = (2 - 1 - turnaround) / 2
+                3. G50V1 WRITE kurulurken       -> yazilan = 3 + gecikme
+              lan (`LANTimeSyncTask`):
+                1. FC=24 istegi kurulurken      -> yazilan = 1 (G50V3)
+
+            Gecikme telafisi tek basina yazilani tolerans disina itebilir
+            (asiri RTT, ya da cagrilar arasinda saat kaynagi degisirse —
+            1.15.1'deki "once 0 sonra gercek zaman" yolu ~28 yil ileri bir
+            zaman uretirdi). 2. adimda olculen tur suresi
+            `2 * _ZAMAN_YAZMA_TOLERANS_MS`yi asarsa ya da negatifse 1. adimin
+            degeri geri verilir: kutuphane gecikmeyi 0 hesaplar ve cihaza
+            telafisiz guncel zaman yazilir.
+            """
+            taban, kaynak = _saat_tahmini_ms()
+            gorev = self._zaman_gorevi
+            if gorev is None:
+                # Now() yalnizca zaman gorevlerinde cagrilir (kutuphane
+                # kaynagi); OnTaskStart kacirildiysa da gecerli zaman doner.
+                return taban
+            cagrilar: list[int] = gorev["cagrilar"]
+            sira = len(cagrilar) + 1
+            deger = taban
+            if gorev["yontem"] == "nonlan":
+                if sira == 2:
+                    tur_ms = taban - cagrilar[0]
+                    if tur_ms < 0 or tur_ms > 2 * _ZAMAN_YAZMA_TOLERANS_MS:
+                        deger = cagrilar[0]
+                        logger.error(
+                            "dnp3_time_sync_delay_clamped device=%s rtt_ms=%d source=%s — "
+                            "olculen tur suresi gecikme telafisini tolerans disina "
+                            "itiyordu; telafisiz guncel zaman yazilacak",
+                            device_code,
+                            tur_ms,
+                            kaynak,
+                        )
+                elif sira == 3:
+                    gecikme_ust = max(0, cagrilar[1] - cagrilar[0]) // 2
+                    _zaman_yazimini_logla(
+                        device_code, taban + gecikme_ust, taban, "nonlan", kaynak, gecikme_ust
+                    )
+            elif sira == 1:
+                _zaman_yazimini_logla(device_code, taban, taban, "lan", kaynak, 0)
+            cagrilar.append(deger)
+            return deger
 
     return _MasterApp()
+
+
+def _zaman_yazimini_logla(
+    device_code: str,
+    yazilacak_ms: int,
+    gercek_ms: int,
+    yontem: str,
+    kaynak: str,
+    gecikme_ust_ms: int,
+) -> None:
+    """Cihaza YAZILACAK zamani logla; degismez bozulursa ERROR.
+
+    `yazilacak_ms` nonlan'da UST SINIRDIR: kutuphane gecikmeden cihazin
+    bildirdigi islem suresini de duser (gateway o degeri goremez).
+
+    YAZIM BURADA ENGELLENEMEZ — kutuphane veto sunmuyor. Normal akista
+    degismez zaten saglanir (`Now()` gercek UTC tahmini doner, gecikme
+    telafisi sinirlanir); ERROR yalnizca host saati 2001 oncesindeyken ve
+    guard bagli DEGILKEN (adapter main.py disinda) gorulebilir.
+    """
+    sapma_ms = yazilacak_ms - gercek_ms
+    if yazilacak_ms < _GECERLI_ZAMAN_ALT_SINIR_MS or abs(sapma_ms) > _ZAMAN_YAZMA_TOLERANS_MS:
+        logger.error(
+            "dnp3_time_sync_invalid_value device=%s value=%s method=%s deviation_ms=%d source=%s — "
+            "cihaza yazilacak zaman GECERSIZ (2001 oncesi ya da gercek UTC'den >%d ms sapma); "
+            "kutuphane veto desteklemedigi icin yazim engellenemedi",
+            device_code,
+            _iso_utc(yazilacak_ms),
+            yontem,
+            sapma_ms,
+            kaynak,
+            _ZAMAN_YAZMA_TOLERANS_MS,
+        )
+        return
+    logger.info(
+        "dnp3_time_sync_write device=%s value=%s method=%s source=%s delay_ms<=%d",
+        device_code,
+        _iso_utc(yazilacak_ms),
+        yontem,
+        kaynak,
+        gecikme_ust_ms,
+    )
 
 
 class _OturumDurumu:
@@ -2126,12 +2373,17 @@ class _ManagedMaster(_OturumDurumu):
         tcp_port: int,
         scan_interval_sec: int,
         baseline_interval_sec: int,
-        time_sync: str = "lan",
+        time_sync: str = "nonlan",
         session_policy: str = "continuous",
         known_mode: str | None = None,
     ) -> None:
         self.device = device
         self.cache = _DeviceCache()
+        #: Bu master'a UYGULANAN zaman senkronu proseduru (`lan|nonlan|none`).
+        #: Saat korumasi guvensizken caller `none` verir (bkz.
+        #: `_etkin_zaman_senkronu`); kutuphane config'i sonradan degistirmeye
+        #: izin vermedigi icin degisim master'in yeniden kurulmasini gerektirir.
+        self.time_sync: str = (time_sync or "nonlan").strip().lower()
         # Bu master'i belirleyen baglanti parametrelerinin imzasi. Caller
         # (_ensure_master) kurduktan sonra doldurur; config'te bu degerlerden
         # biri degisirse master yeniden kurulur.
@@ -2289,7 +2541,17 @@ class _ManagedMaster(_OturumDurumu):
             )
         except Exception:  # noqa: BLE001
             logger.debug("yadnp3_fragment_limit_unsupported device=%s", device.code, exc_info=True)
-        self._apply_time_sync(cfg, time_sync)
+        self._apply_time_sync(cfg, self.time_sync)
+        if self.time_sync == "lan" and _horstmann_profilli_mi(device):
+            # Uyari, secim DEGIL: prosedur yine acik yapilandirmadan gelir.
+            logger.warning(
+                "dnp3_time_sync_lan_on_horstmann device=%s signal_profile=%s session_policy=%s — "
+                "LAN proseduru FC=24 + G50V3 kullanir; Horstmann Smart Navigator 2.0 bunlari "
+                "DESTEKLEMEZ (manual 5.2: yalnizca FC=23 + G50V1). DNP3_TIME_SYNC=nonlan kullanin",
+                device.code,
+                getattr(device, "signal_profile", None),
+                getattr(device, "session_policy", None),
+            )
         cfg.link.LocalAddr = int(local_address)
         cfg.link.RemoteAddr = int(device.dnp3_address)
         # ---- LINK KEEPALIVE — SMART'ta KAPATILIR --------------------------
@@ -2374,7 +2636,7 @@ class _ManagedMaster(_OturumDurumu):
         logger.info(
             "yadnp3_master_enabled device=%s mode=%s endpoint=%s remote=%s local=%s "
             "ip_endpoint_type=%s configured_policy=%s effective_policy=%s "
-            "operation_mode=%s periodic_scans=%s event_scan=%s baseline_scan=%s",
+            "operation_mode=%s periodic_scans=%s event_scan=%s baseline_scan=%s time_sync=%s",
             device.code,
             channel_mode,
             channel_endpoint_label,
@@ -2387,6 +2649,7 @@ class _ManagedMaster(_OturumDurumu):
             "true" if periyodik else "false",
             f"{self._scan_interval_sec}s" if periyodik else "-",
             f"{self._baseline_interval_sec}s" if periyodik else "-",
+            self.time_sync,
         )
 
     @staticmethod
@@ -2544,15 +2807,16 @@ class _ManagedMaster(_OturumDurumu):
         sadece tasir, anlamlandirmaz" der. Ona bakip prosedur secmek bir
         string heuristic'i olurdu: backend bir gun profil adini degistirse
         gateway SESSIZCE yanlis prosedure gecerdi. Bu yuzden secim ACIK
-        YAPILANDIRMAYLA yapilir -- Horstmann kurulumunda
-        ``DNP3_TIME_SYNC=nonlan``.
+        YAPILANDIRMAYLA yapilir. 1.16.0'dan itibaren VARSAYILAN ``nonlan``dir
+        (filonun tamami Horstmann); ``lan`` acikca secilebilir ve Horstmann
+        profilli bir cihazda kullanilirsa yalnizca UYARI loglanir.
 
         FAIL-CLOSED
         -----------
         Istenen prosedur binding'de yoksa saat senkronizasyonu KAPATILIR ve
         ERROR loglanir; baska bir prosedure DUSULMEZ.
         """
-        want = (mode or "lan").strip().lower()
+        want = (mode or "nonlan").strip().lower()
         enum_cls = getattr(opendnp3, "TimeSyncMode", None)
         if enum_cls is None:
             logger.error(
@@ -2963,13 +3227,14 @@ class Yadnp3TelemetryReader(TelemetryReader):
         baseline_interval_sec: int = 60,
         log_level: str = "NORMAL",
         manager_threads: int = 0,
-        time_sync: str = "lan",
+        time_sync: str = "nonlan",
         publish_quality_flags: bool = False,
         device_count_hint: int = 0,
         lost_probe_interval_sec: float = 0.0,
         lost_relink_after_probes: int = 0,
         smart_max_silence_sec: int | None = None,
         session_store_path: str | None = None,
+        smart_half_open_sec: int = _SMART_HALF_OPEN_SEC,
     ) -> None:
         if not _YADNP3_AVAILABLE:
             raise Yadnp3AdapterError(
@@ -2979,7 +3244,6 @@ class Yadnp3TelemetryReader(TelemetryReader):
         self._default_dnp3_tcp_port = int(default_dnp3_tcp_port)
         self._scan_interval_sec = int(scan_interval_sec)
         self._baseline_interval_sec = int(baseline_interval_sec)
-        self._time_sync = (time_sync or "lan").strip().lower()
         # Kalite bayraklarinin YAYINA girmesi backend hazir olunca acilir
         # (bkz. docs/BACKEND_TODO.md#B1); bayraklar her durumda okunur.
         self._publish_dnp3_quality = bool(publish_quality_flags)
@@ -3008,6 +3272,8 @@ class Yadnp3TelemetryReader(TelemetryReader):
             lost_relink_after_probes=lost_relink_after_probes,
             smart_max_silence_sec=smart_max_silence_sec,
             session_store_path=session_store_path,
+            time_sync=time_sync,
+            smart_half_open_sec=smart_half_open_sec,
         )
 
     def _init_runtime_state(
@@ -3018,6 +3284,8 @@ class Yadnp3TelemetryReader(TelemetryReader):
         smart_max_silence_sec: int | None = None,
         session_store_path: str | None = None,
         diagnostics: bool = True,
+        time_sync: str = "nonlan",
+        smart_half_open_sec: int = _SMART_HALF_OPEN_SEC,
     ) -> None:
         """NATIVE OLMAYAN tum calisma-zamani alanlarini kurar.
 
@@ -3031,6 +3299,15 @@ class Yadnp3TelemetryReader(TelemetryReader):
         ve testler gercek nesneden AYRISIYORDU (bu ozellikte de tam olarak
         oyle oldu). Tek kaynak burasi; testler de bu metodu cagirir.
         """
+        #: YAPILANDIRILAN zaman senkronu proseduru (`DNP3_TIME_SYNC`). Master'a
+        #: UYGULANAN deger saat korumasina gore `none` olabilir
+        #: (`_etkin_zaman_senkronu`) ve baglanti imzasina girer. Burada kurulur
+        #: cunku imza hesabi bu alani okur.
+        self._time_sync: str = (time_sync or "nonlan").strip().lower()
+        #: Yari-acik Smart oturumu esigi (sn); 0 = kapali. Bkz.
+        #: `_smart_oturumu_yari_acik_mi`.
+        self._smart_half_open_sec = max(0, int(smart_half_open_sec or 0))
+        self._smart_yari_acik_total = 0
         self._masters: dict[str, _ManagedMaster] = {}
         # Lock granulariteyi azaltmak icin double-check pattern: lock disinda
         # hizli dict lookup; sadece master OLUSTURURKEN lock alinir.
@@ -3146,7 +3423,88 @@ class Yadnp3TelemetryReader(TelemetryReader):
             # degistiren operator hicbir etki gormez; cihaz eski rejimde
             # calismaya devam eder ve bu YALNIZCA sahada fark edilirdi.
             self._session_policy(device),
+            # UYGULANAN ZAMAN SENKRONU PROSEDURU — SON ALAN OLMALI
+            # (`_zaman_senkronu_acilisi_ertelenmeli` bunu varsayar). Saat
+            # korumasi guvensizken `none` olur; kutuphane `timeSyncMode`u
+            # sonradan degistiremedigi icin koruma durumu degisince master
+            # yeniden kurulur. Gercek veto yolu budur (bkz. `Now()`).
+            _etkin_zaman_senkronu(self._time_sync)[0],
         )
+
+    @staticmethod
+    def _zaman_senkronu_acilisi_ertelenmeli(mm: _ManagedMaster, want: tuple) -> bool:
+        """Yalnizca zaman senkronunun ACILMASI icin calisan Smart oturumu bozulmaz.
+
+        Tipik yol: disk onbellegiyle acilis -> master'lar saat `unknown`ken
+        `none` ile kurulur -> backend'in ilk `Date` basligi gelir -> imza
+        degisir. O anda Smart oturumu ACIK olan bir cihazin master'ini
+        yikmak, cihazin kisa uyanik penceresini ve raporunu kaybettirir.
+        Acilis oturum kapaninca (link kapali) yapilir; cihaz bir sonraki
+        uyanista dogru prosedurle karsilanir.
+
+        KAPATMA (`none`a gecis — saat guvensizlesti) ERTELENMEZ: yanlis saati
+        yazmamak oturumu korumaktan onceliklidir. Continuous cihazlar da
+        beklemez (hep bagli olduklari icin acilis hic gerceklesmezdi).
+
+        Erteleme yalnizca CANLI bir oturum icindir: son kanit (yoksa link
+        acilisi) `_ZAMAN_ACILIS_ERTELEME_MAX_SEC`ten eskiyse oturum fiilen
+        bitmistir (yari-acik soket olabilir) ve beklemek acilisi SURESIZ
+        geciktirirdi.
+        """
+        eski = mm.connection_fingerprint
+        if not eski or len(eski) != len(want) or eski[:-1] != want[:-1]:
+            return False
+        if want[-1] == "none" or getattr(mm, "session_policy", None) != "smart":
+            return False
+        try:
+            cache = mm.cache
+            if not cache.is_connected():
+                return False
+            son_kanit = float(cache.last_evidence_at() or 0.0)
+            tazelik = (time.monotonic() - son_kanit) if son_kanit else float(cache.link_age())
+            return 0.0 <= tazelik < _ZAMAN_ACILIS_ERTELEME_MAX_SEC
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _zaman_senkronu_kararini_logla(self, device_code: str, etkin: str) -> None:
+        """Master'a uygulanan zaman senkronu kararini KENAR-TETIKLI logla.
+
+        `unknown` ile `unsafe` AYRI raporlanir: ikisi de yazimi kapatir ama
+        operatorun yapacagi sey farklidir. Cihaz basina askiya alma bir kez,
+        yeniden acilis bir kez loglanir.
+        """
+        if self._time_sync == "none":
+            return
+        if etkin != "none":
+            if _saat_uyarisini_sifirla(device_code):
+                logger.info(
+                    "dnp3_time_sync_resumed device=%s time_sync=%s — saat korumasi guvenli; "
+                    "cihaz NEED_TIME bildirdiginde zaman yazilacak",
+                    device_code,
+                    etkin,
+                )
+            return
+        if not _saat_uyarisi_ver(device_code):
+            return
+        durum = _etkin_zaman_senkronu(self._time_sync)[1]
+        if durum == "unsafe":
+            logger.error(
+                "dnp3_time_sync_suspended device=%s sebep=clock_unsafe configured=%s — gateway "
+                "saati guvenilmez (sapma esigi asildi); master zaman gorevi OLMADAN kuruldu, "
+                "cihaza saat YAZILMAZ. Sunucuda NTP/w32time servisini kontrol edin.",
+                device_code,
+                self._time_sync,
+            )
+        else:
+            logger.warning(
+                "dnp3_time_sync_suspended device=%s sebep=clock_unknown configured=%s — gateway "
+                "saati backend'e karsi HENUZ DOGRULANMADI (soguk acilis / backend erisilemez); "
+                "master zaman gorevi OLMADAN kuruldu, cihaza saat YAZILMAZ. Backend'e ilk "
+                "basarili istekte master yeniden kurulur. Telemetri, polling ve komut akisi "
+                "ETKILENMEZ.",
+                device_code,
+                self._time_sync,
+            )
 
     def _ensure_master(
         self,
@@ -3185,6 +3543,19 @@ class Yadnp3TelemetryReader(TelemetryReader):
         if existing is not None and existing.connection_fingerprint == want:
             self._g110_araliklarini_guncelle(existing, g110, signals)
             return existing
+        if existing is not None and self._zaman_senkronu_acilisi_ertelenmeli(existing, want):
+            if not getattr(existing, "zaman_acilisi_ertelendi", False):
+                existing.zaman_acilisi_ertelendi = True
+                logger.info(
+                    "dnp3_time_sync_enable_deferred device=%s time_sync=%s->%s — saat korumasi "
+                    "guvenli ama Smart oturumu ACIK; master oturum kapaninca yeniden kurulacak "
+                    "ve zaman yazimi o zaman acilacak",
+                    device.code,
+                    existing.connection_fingerprint[-1],
+                    want[-1],
+                )
+            self._g110_araliklarini_guncelle(existing, g110, signals)
+            return existing
 
         hazir: _ManagedMaster | None = None
         with self._lock:
@@ -3192,14 +3563,29 @@ class Yadnp3TelemetryReader(TelemetryReader):
             if existing is not None and existing.connection_fingerprint == want:
                 hazir = existing
             elif existing is not None:
-                # Baglanti parametreleri degisti -> eskisini kapat, yeniden kur.
-                logger.warning(
-                    "yadnp3_master_rebuild device=%s eski=%s yeni=%s — cihaz "
-                    "baglanti parametreleri degisti, oturum yeniden kuruluyor",
-                    device.code,
-                    existing.connection_fingerprint,
-                    want,
-                )
+                eski = existing.connection_fingerprint
+                if eski and len(eski) == len(want) and eski[:-1] == want[:-1]:
+                    # YALNIZCA uygulanan zaman senkronu degisti (saat korumasi
+                    # durumu degisti). Kutuphane `timeSyncMode`u calisan
+                    # master'da degistiremez; tek yol yeniden kurmak.
+                    logger.warning(
+                        "dnp3_time_sync_master_rebuild device=%s time_sync=%s->%s clock_state=%s — "
+                        "saat korumasi durumu degisti; zaman senkronu proseduru master yeniden "
+                        "kurularak uygulaniyor",
+                        device.code,
+                        eski[-1],
+                        want[-1],
+                        _etkin_zaman_senkronu(self._time_sync)[1],
+                    )
+                else:
+                    # Baglanti parametreleri degisti -> eskisini kapat, yeniden kur.
+                    logger.warning(
+                        "yadnp3_master_rebuild device=%s eski=%s yeni=%s — cihaz "
+                        "baglanti parametreleri degisti, oturum yeniden kuruluyor",
+                        device.code,
+                        eski,
+                        want,
+                    )
                 try:
                     existing.shutdown()
                 except Exception:  # noqa: BLE001
@@ -3228,7 +3614,9 @@ class Yadnp3TelemetryReader(TelemetryReader):
                         tcp_port=port,
                         scan_interval_sec=self._scan_interval_sec,
                         baseline_interval_sec=self._baseline_interval_sec,
-                        time_sync=self._time_sync,
+                        # YAPILANDIRILAN degil UYGULANAN prosedur (imzanin son
+                        # alani): saat guvensizken `none`.
+                        time_sync=want[-1],
                         session_policy=policy,
                         known_mode=bilinen_mod,
                     )
@@ -3245,6 +3633,7 @@ class Yadnp3TelemetryReader(TelemetryReader):
                 mm.g110_ranges = g110
                 self._durumu_geri_yukle(mm, device)
                 self._masters[device.code] = mm
+                self._zaman_senkronu_kararini_logla(device.code, want[-1])
 
         # Yarista baska bir thread kurmus: yalnizca bloklari tazele.
         if hazir is not None:
@@ -3330,6 +3719,7 @@ class Yadnp3TelemetryReader(TelemetryReader):
                 {
                     "smart_idle_wakeup_total": self._smart_uyanma_total,
                     "smart_silence_lost_total": self._smart_silence_lost_total,
+                    "smart_half_open_total": getattr(self, "_smart_yari_acik_total", 0),
                 }
             )
         return ozet
@@ -3564,6 +3954,67 @@ class Yadnp3TelemetryReader(TelemetryReader):
             if self._masters.get(device_code) is mm:
                 self._masters.pop(device_code, None)
 
+    def _smart_oturumu_yari_acik_mi(self, mm: _ManagedMaster) -> tuple[float, float] | None:
+        """Bagli gorunen Smart oturumu fiilen olu mu? Donen: `(link_yasi, kanit_yasi)`.
+
+        Kosullarin HEPSI gerekir (bkz. `_SMART_HALF_OPEN_SEC`):
+          * esik acik (`DNP3_SMART_HALF_OPEN_SEC` > 0),
+          * link en az esik kadar suredir acik,
+          * son gecerli DNP3 kaniti (yoksa link acilisi) en az esik kadar eski,
+          * son komut `_LOST_RELINK_COMMAND_GRACE_SEC`ten eski (ucustaki CROB
+            oturum yikilirsa `UNDEFINED` doner).
+
+        Bu kontrol CIHAZA HICBIR SEY GONDERMEZ — Smart sessizlik degismezi
+        korunur. Yalnizca gateway'in kendi zaman damgalarina bakar.
+        """
+        esik = int(getattr(self, "_smart_half_open_sec", 0) or 0)
+        if esik <= 0:
+            return None
+        cache = mm.cache
+        link_yasi = float(cache.link_age())
+        if link_yasi < esik:
+            return None
+        simdi = time.monotonic()
+        son_kanit = float(cache.last_evidence_at() or 0.0)
+        kanit_yasi = (simdi - son_kanit) if son_kanit else link_yasi
+        if kanit_yasi < esik:
+            return None
+        son_komut = float(getattr(mm, "last_command_at", 0.0) or 0.0)
+        if son_komut and (simdi - son_komut) < _LOST_RELINK_COMMAND_GRACE_SEC:
+            return None
+        return link_yasi, kanit_yasi
+
+    def _yari_acik_smart_oturumunu_kapat(
+        self, mm: _ManagedMaster, device: DeviceConfig, link_yasi: float, kanit_yasi: float
+    ) -> None:
+        """Olu Smart oturumunu KAPANMIS gibi isle ve YALNIZCA o master'i yeniden kur.
+
+        Sira onemli:
+          1. `set_connected(False)`: `OnClose` ile ayni gecis tablosu — oturumda
+             kanit varsa `smart_idle` (saglikli uyku), yoksa `lost`.
+          2. Kalici kayit: yeni master `_durumu_geri_yukle` ile `smart_idle`i
+             geri alir; sahte comm_lost uretilmez.
+          3. Master dusurulur: bir sonraki cycle `_ensure_master` taze bir kanal
+             kurar. Listening'de gateway yeniden baglanmayi dener; initiating'de
+             cihazin bir sonraki aramasi yeni sokete duser.
+        """
+        with self._smart_sayaclari_lock:
+            self._smart_yari_acik_total += 1
+        logger.warning(
+            "smart_half_open_suspected device=%s ip=%s link_age=%.0fs evidence_age=%.0fs "
+            "limit=%ds — Smart oturumu acik gorunuyor ama cihaz uzun suredir sessiz; TCP "
+            "yari-acik sayildi (FIN kaybolmus olabilir). Oturum kapanmis gibi islenip YALNIZCA "
+            "bu cihazin master'i yeniden kuruluyor",
+            device.code,
+            device.ip_address,
+            link_yasi,
+            kanit_yasi,
+            self._smart_half_open_sec,
+        )
+        mm.cache.set_connected(False)
+        self._cihaz_durumunu_kaydet(mm, device)
+        self._masteri_dusur(mm, device.code)
+
     # ---- AUTO: Master Operation Mode -> etkin politika -----------------
 
     def _mod_sinyalini_coz(self, device: DeviceConfig, signals: list[SignalConfig] | None) -> Any | None:
@@ -3616,10 +4067,12 @@ class Yadnp3TelemetryReader(TelemetryReader):
             )
         elif durum == "need_time":
             logger.info(
-                "dnp3_device_clock_need_time device=%s — cihaz IIN1.4 ile saat istiyor; "
-                "DNP3_TIME_SYNC=lan|nonlan ile yazilmasi BEKLENIR (prosedur cihazin "
-                "ilan ettigi profile gore secilir; Horstmann SN 2.0 icin `nonlan`)",
+                "dnp3_device_clock_need_time device=%s time_sync=%s — cihaz IIN1.4 ile saat "
+                "istiyor; time_sync=lan|nonlan ise yazilmasi BEKLENIR, `none` ise yazilmaz "
+                "(DNP3_TIME_SYNC kapali ya da gateway saati dogrulanmadi; Horstmann SN 2.0 "
+                "icin prosedur `nonlan`)",
                 device_code,
+                getattr(mm, "time_sync", "?"),
             )
         elif durum == "ok" and onceki in ("invalid", "need_time"):
             logger.info(
@@ -4332,6 +4785,17 @@ class Yadnp3TelemetryReader(TelemetryReader):
 
         # ETKIN politika: `auto` cozuldukce degisebilir, manuelde sabittir.
         smart = mm.session_policy == "smart"
+
+        # YARI-ACIK SMART OTURUMU — bagli gorunen ama fiilen olu oturum.
+        # Asagidaki kurallarin HICBIRI bagli bir Smart oturumu `online`dan
+        # cikaramaz (bayatlik ve yoklama smart'ta kapali, sessizlik denetimi
+        # yalnizca bagli DEGILKEN isler); bu kontrol olmadan cihaz SURESIZ
+        # `online` kalirdi. Cihaza hicbir sey gonderilmez.
+        if smart and connected:
+            yari_acik = self._smart_oturumu_yari_acik_mi(mm)
+            if yari_acik is not None:
+                self._yari_acik_smart_oturumunu_kapat(mm, device, *yari_acik)
+                connected = cache.is_connected()
 
         # G110 (string) okumasi — link ACILDIKTAN SONRA, POLL THREAD'inden.
         # `OnOpen` yalnizca "istendi" der (o callback opendnp3'un IO

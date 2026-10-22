@@ -2,6 +2,138 @@
 
 Semver'a gore tutulur. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.16.0] - 2026-10-22
+
+Kritik duzeltme: **gateway cihazlara 1970-01-01 00:00:00.000 UTC yaziyordu.**
+Sahadaki belirti: Horstmann Smart Navigator 2.0 saati surekli 00:00'a
+donuyor, Dial-In 00:59 (UTC) ayarliyken cihaz ~59 dakikada bir uyaniyor,
+baska Dial-In saatlerine (02:40, 15:40 ...) hic ulasilmiyordu.
+
+> **Fiziksel cihazda ve gercek gateway trafiginde HENUZ DOGRULANMADI.**
+> Kanit loopback'te (gercek yadnp3 outstation) ve ham cerceve seviyesindedir.
+> Saha kabulu icin bkz. `docs/HORSTMANN_SMART_MODE.md` §6b.
+
+### Fixed
+
+- **Kok neden: `Now()` yanlis tip donduruyordu (P0).** `IMasterApplication.Now()`
+  `opendnp3.DNPTime` donduruyordu. Binding trampolini
+  (`python/src/master.cpp`, `PyMasterApplication::Now`) `UTCTimestamp`
+  bekler; iki tip arasinda donusum yoktur. `pybind11::cast_error` bir
+  `std::exception` oldugu icin sessizce yutulur ve `UTCTimestamp(0)` doner.
+  Kutuphane (`SerialTimeSyncTask` / `LANTimeSyncTask`) degeri kontrol
+  etmeden yazar. Sonuc: her NEED_TIME'da FC=23 gecikmesi 0 hesaplandi ve
+  G50V1 = 0 yazildi (tel: `.. 02 32 01 07 01 00 00 00 00 00 00`).
+
+  Olcum (gateway `.venv`, yadnp3 3.2.1.1 cp310, loopback):
+
+  | Now() donusu | Cihaza yazilan |
+  |---|---|
+  | `DNPTime(time.time()*1000)` (1.15.1) | 1970-01-01 00:00:00.000 UTC |
+  | `DNPTime(0)` (1.15.1 saat korumasi) | 1970-01-01 00:00:00.000 UTC |
+  | 1.16.0 gercek `_make_master_app` | dogru UTC (fark +0.0 sn) |
+
+  Artik `Now()` **her zaman** `UTCTimestamp(gercek UTC)` doner ve **hicbir
+  istisna sizdirmaz** (istisna da binding'de 0'a donusuyordu).
+  `_gecersiz_dnptime` kaldirildi.
+
+- **Saat korumasi yazimi gercekte engellemiyordu (P0).** 1.15.1'de koruma
+  `Now()` icinde "gecersiz zaman" dondurerek yapiliyordu; docstring'ler
+  "opendnp3 bu durumda yazmaz" diyordu — **YANLISTI**: o deger de 1970 olarak
+  yaziliyordu. `UTCTimestamp`in kalite alani yok ve kutuphane degeri
+  dogrulamiyor; yani `Now()` yazimi veto EDEMEZ. Yeni tasarim: saat
+  `unknown`/`unsafe` iken master **`timeSyncMode=None`** ile kurulur (zaman
+  gorevi hic olusmaz). Uygulanan prosedur baglanti imzasina girer; saat
+  durumu degisince master yeniden kurulur. Acik bir Smart oturumu varken
+  ACILIS oturum kapanana kadar ertelenir (cihazin kisa uyanik penceresi
+  bozulmaz); KAPATMA ertelenmez.
+
+- **2-30 sn sapmis host saati cihaza yaziliyordu.** Koruma 30 sn'ye kadar
+  sapmayi `safe` sayar; host saati oldugu gibi yazilsaydi "gercek UTC'den
+  +-5 sn" kurali cignenirdi. Sapma 2 sn'yi asinca yazilan deger backend
+  `Date` basligina gore duzeltilir (`source=backend_duzeltilmis`).
+  `ClockGuard`a histerezis eklendi: `unsafe` -> `safe` icin sapma < 25 sn
+  olmali. Aksi halde 30 sn civarinda gidip gelen bir olcum her geciste tum
+  master'lari yeniden kurdururdu.
+
+- **NonLAN gecikme telafisi sinirlandi.** Kutuphane `yazilan = simdi +
+  (tur - islem) / 2` hesaplar. 1.15.1'de koruma gorev ortasinda "safe"
+  olursa (once 0 sonra gercek zaman) gecikme ~now/2 cikip ~28 yil ileri bir
+  zaman yazilabilirdi. Olculen tur suresi 10 sn'yi asarsa ya da negatifse
+  telafi uygulanmaz (`dnp3_time_sync_delay_clamped`, ERROR).
+
+- **Smart cihaz suresiz `online` kaliyordu (yari-acik TCP).** Smart'ta link
+  keepalive ve periyodik tarama BILEREK kapali; 4G hatti FIN'siz duserse soket
+  gateway'de ESTABLISHED kalir, `OnClose` gelmez ve cihaz `online` gorunur.
+  Bayatlik kurali ve kopuk cihaz yoklamasi Smart'ta kapali, sessizlik denetimi
+  ise yalnizca bagli DEGILKEN isliyordu — yani hicbir sey cihazi `online`dan
+  cikaramiyordu. Listening'de gateway "bagliyim" sandigi icin cihaz uyandiginda
+  yeniden baglanmiyordu bile. Sahada "restart duzeltiyor" diye gorulen buydu.
+  Artik link acik ve son DNP3 kaniti `DNP3_SMART_HALF_OPEN_SEC` (varsayilan 900,
+  0 = kapali) saniyeden eskiyse oturum kapanmis gibi islenir (kanit varsa
+  `smart_idle`), kalici kayda yazilir ve YALNIZCA o cihazin master'i yeniden
+  kurulur (`smart_half_open_suspected`, `/health` `smart_half_open_total`).
+  Cihaza hicbir sey gonderilmez; Smart sessizlik degismezi korunur.
+
+- **IIN bayraklari hic okunamiyordu.** yadnp3 3.2.1.1 `IINField` bayraklari
+  `IsSet(IINBit.X)` ile verir; `_iin_bit` bool ozellik aradigi icin HER ZAMAN
+  False donuyordu. NEED_TIME, DEVICE_RESTART ve EVENT_BUFFER_OVERFLOW hic
+  gorunmuyordu: `dnp3_need_time` logu, `need_time_iin`,
+  `device_clock_status=need_time` ve `dnp3_event_buffer_overflow` ERROR'u
+  calismiyordu. Kontrol akisi etkilenmez (zaman gorevini kutuphane
+  tetikler); yalnizca gorunurluk duzeldi.
+
+### Changed
+
+- **`DNP3_TIME_SYNC` varsayilani `lan` -> `nonlan`.** Cihaz FC=24 + G50V3
+  desteklemez (manual 5.2: FC=2 WRITE g50v1 qualifier 07 + FC=23). `.env`te
+  deger vermeyen kurulumlar `lan` ile cihaz saatini hic duzeltemiyordu.
+  Degisen yerler: `config.py`, adapter kurucu varsayilanlari,
+  `docker/.env.template`, `docker/compose.template.yml`,
+  `scripts/new_gateway.ps1`, `.env.example`, deployment sozlesmesi. `lan`
+  acikca secilebilir; Horstmann profilli cihazda (`signal_profile`
+  `horstmann*` ya da politika `smart`/`auto`) secilirse
+  `dnp3_time_sync_lan_on_horstmann` WARNING'i loglanir — secim degismez.
+
+- **Depo `EnerjiOneTechnologies` organizasyonuna tasindi.** Kaynak
+  `github.com/EnerjiOneTechnologies/enerjione-grid-dnp3-gateway`. Imajlar
+  1.16.0'dan itibaren `ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway`
+  (kucuk harf; release workflow artik `github.repository` kullanmaz).
+  1.15.1 ve oncesi imajlar eski adreste kalir:
+  `ghcr.io/enerjione/enerjione-grid-dnp3-gateway`.
+
+### Added
+
+- **Zaman yazimi loglari.** Her yazim: `dnp3_time_sync_write device=..
+  value=<ISO UTC> method=nonlan|lan source=.. delay_ms<=..` (INFO); cihazin
+  kabulu `dnp3_time_sync_ok` / `dnp3_time_sync_failed`. Deger 2001'den eski
+  ya da gercek UTC tahmininden >5 sn sapiyorsa `dnp3_time_sync_invalid_value`
+  (ERROR). Saat korumasi kararlari: `dnp3_time_sync_suspended`,
+  `dnp3_time_sync_resumed`, `dnp3_time_sync_master_rebuild`,
+  `dnp3_time_sync_enable_deferred`. `yadnp3_master_enabled` satiri artik
+  `time_sync=` alani tasir.
+- **Tel seviyesinde testler** (`tests/test_zaman_senkronu_tel.py`). Gateway'in
+  GERCEK kod yolu (`build_adapter` -> `read_device` -> `_make_master_app`)
+  NEED_TIME isteyen gercek bir outstation'a karsi kosar; yazilan deger ham
+  G50V1 cercevesinden cozulur. Kabul: tam bir FC=23 + bir G50V1, |yazilan -
+  simdi| <= 2 sn, sonra NEED_TIME temiz; saat `unknown`/`unsafe` iken 10 sn
+  boyunca hic G50V1 yok; saat sonradan `safe` olunca dogru zaman yazilir.
+  `test_horstmann_conformance` artik gateway'in kendi master uygulamasini
+  kullanir ve yazilan degeri assert eder (eskiden `Now()`u override etmeyen
+  bir test sinifi 0 yaziyordu ve deger hic kontrol edilmiyordu).
+- `ClockGuard.skew_sec` (salt okunur).
+
+### Upgrade notes
+
+- **Grid:** `infra/gateway-contract/` altina bu surumun release artifact'i
+  (`gateway-deployment-contract.generated.json`) `v1.16.0.json` olarak vendor
+  edilmeli ve CI parity isaretcisi guncellenmeli. Eski anlik goruntuler
+  (v1.11.x, v1.15.1) o surumlerin GERCEK davranisini tarif eder;
+  degistirilmez. Grid zaten her uretim yolunda `nonlan` yaziyor.
+- `.env`te acikca `DNP3_TIME_SYNC=lan` olan Horstmann gateway'leri
+  `nonlan`a cekilmeli (WARNING bunu gosterir).
+- Cihazlarda "Enable Dial-In Settings" kapaliysa Dial-In saat/dakika ayari
+  hic kullanilmaz; "Dial-In Hour" **UTC**'dir (00:59 UTC = 03:59 TR).
+
 ## [1.15.1] - 2026-08-21
 
 Dar kapsamli bakim paketi: **cihaz saglik delta firtinasi** + **cihaz RTC

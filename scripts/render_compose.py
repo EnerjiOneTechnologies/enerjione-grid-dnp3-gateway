@@ -215,7 +215,9 @@ def _yerlestir_portlar(rendered: str, satirlar: list[str]) -> str:
 
 
 #: Uretim imajinin GHCR yolu. Etiket VERSION'dan turetilir.
-IMAGE_REPO = "ghcr.io/enerjione/enerjione-grid-dnp3-gateway"
+# 1.16.0'dan itibaren org deposu (kucuk harf). 1.15.1 ve oncesi imajlar
+# eski adreste kalir: ghcr.io/enerjione/enerjione-grid-dnp3-gateway
+IMAGE_REPO = "ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway"
 
 
 def _surum() -> str:
@@ -382,7 +384,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Docker image. Verilmezse VERSION dosyasindan EXACT semver turetilir "
-            "(orn. ghcr.io/enerjione/enerjione-grid-dnp3-gateway:1.11.4). Uretim ciktisi bilerek `:latest`e BAGLANMAZ."
+            "(orn. ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:1.16.0). Uretim ciktisi bilerek `:latest`e BAGLANMAZ."
         ),
     )
     p.add_argument(

@@ -8,7 +8,7 @@
 #   {{BACKEND_API_URL}} — backend public URL (orn. https://api.enerjione.local/api/v1)
 #   {{NATS_URL}}        — JetStream URL (orn. nats://enerjione-nats:4222)
 #   {{HOST_HEALTH_PORT}}— host tarafinda exposed port (her instance icin farkli)
-#   {{IMAGE}}           — docker image tag (orn. ghcr.io/enerjione/enerjione-grid-dnp3-gateway:1.15.0)
+#   {{IMAGE}}           — docker image tag (orn. ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:1.16.0)
 #   {{APP_ENVIRONMENT}} — production | staging | development
 #   {{DEVICE_HEALTH_ENABLED_DEFAULT}} — cihaz saglik kanalinin RENDER edilmis
 #                         varsayilani ("true"/"false", varsayilan "false").
@@ -120,9 +120,10 @@ services:
       #   nonlan -> FC=23 DELAY_MEASUREMENT   + WRITE G50V1
       #
       # HORSTMANN SN 2.0 / Pole Master resmi Device Profile FC=23 + G50V1
-      # ILAN EDER (FC=24 / G50V3 ILAN EDILMEMISTIR). Horstmann filosunda
-      # bu degeri "nonlan" YAPIN. Varsayilan geriye uyumluluk icin "lan".
-      DNP3_TIME_SYNC: "lan"
+      # ILAN EDER (FC=24 / G50V3 ILAN EDILMEMISTIR). 1.16.0'dan beri
+      # varsayilan "nonlan"; "lan" yalnizca FC=24/G50V3 ilan eden cihazlar
+      # icin ACIKCA secilir.
+      DNP3_TIME_SYNC: "nonlan"
       # NOT: DNP3_RESPONSE_TIMEOUT_SEC / DNP3_READ_STRATEGY kaldirildi —
       # bunlar YALNIZCA legacy DNP3_LIBRARY=dnp3py dalinda gecerli; varsayilan
       # yadnp3 adapter'i onlari yok sayiyor ve set edilmeleri operatoru

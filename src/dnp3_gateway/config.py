@@ -726,6 +726,20 @@ class Settings(BaseSettings):
             "gomulu bir varsayim YOKTUR."
         ),
     )
+    dnp3_smart_half_open_sec: int = Field(
+        default=900,
+        description=(
+            "YARI-ACIK SMART OTURUMU (1.16.0). session_policy=smart bir cihazin "
+            "TCP oturumu acik gorunurken hem link yasi hem son gecerli DNP3 kaniti "
+            "bu kadar saniyeyi asarsa oturum yari-acik sayilir: baglanti kapanmis "
+            "gibi islenir (kanit varsa smart_idle, yoksa lost) ve YALNIZCA o "
+            "cihazin master'i yeniden kurulur. Smart'ta keepalive ve tarama "
+            "BILEREK kapali oldugu icin, FIN'i kaybolan bir 4G oturumu aksi halde "
+            "cihazi SURESIZ `online` gosteriyordu (yalnizca restart duzeltiyordu). "
+            "Saglikli bir Horstmann Smart oturumu 15 sn bosta kapanir. "
+            "KABUL: 0 (KAPALI) veya 120..86400. Varsayilan 900."
+        ),
+    )
 
     # ----- Cihaz basina calisma-zamani sagligi (G-DEVICE-HEALTH-01) --------
     # AYRI, GIDEN, GOVDE tabanli kanal. `X-E1-Gateway-Health` toplu basligini
@@ -842,7 +856,7 @@ class Settings(BaseSettings):
         ),
     )
     dnp3_time_sync: str = Field(
-        default="lan",
+        default="nonlan",
         description=(
             "DNP3 master->outstation zaman senkronizasyon PROSEDURU: "
             "lan | nonlan | none. "
@@ -855,9 +869,11 @@ class Settings(BaseSettings):
             "nonlan -> FC=23 DELAY_MEASUREMENT + WRITE G50V1; "
             "none -> saat HIC yazilmaz. "
             "HORSTMANN Smart Navigator 2.0 / Pole Master resmi Device Profile "
-            "FC=23 ve G50V1 ILAN EDER; FC=24 ve G50V3 ILAN EDILMEMISTIR — bu "
-            "cihazlarda dogru deger 'nonlan'dir. Varsayilan geriye uyumluluk "
-            "icin 'lan' KALIR; Horstmann kurulumlarinda ACIKCA 'nonlan' verin. "
+            "FC=23 ve G50V1 ILAN EDER; FC=24 ve G50V3 ILAN EDILMEMISTIR (manual "
+            "5.2) — bu cihazlarda dogru deger 'nonlan'dir. VARSAYILAN 1.16.0'dan "
+            "beri 'nonlan' (filonun tamami Horstmann; onceki 'lan' varsayilani "
+            "sahada cihaz saatini hic duzeltemiyordu). 'lan' ACIKCA secilebilir; "
+            "Horstmann profilli cihazda secilirse WARNING loglanir. "
             "Outstation'lar tipik olarak ayda 10-60sn RTC drift yapar ve guc "
             "kesintisinden sonra saatlerini sifirlar; master zaman yazmazsa "
             "cihaz kendi olay damgalarini yanlis saatle uretir ve IIN1.4 "
@@ -866,8 +882,9 @@ class Settings(BaseSettings):
             "asserted ettiginde saat yazar; saat yanlis olup cihaz NEED_TIME "
             "bildirmiyorsa gateway ZORLA yazmaz, durum yalnizca "
             "`device_clock_status` ile gorunur kilinir. "
-            "Gateway saati guvenilmez goruldugunde (ClockGuard) yazim "
-            "otomatik durur."
+            "Gateway saati dogrulanmamis ya da guvenilmez iken (ClockGuard) "
+            "master zaman gorevi OLMADAN kurulur ve cihaza hicbir deger "
+            "yazilmaz; saat guvenli olunca master yeniden kurulur."
         ),
     )
     dnp3_publish_quality_flags: bool = Field(
@@ -931,6 +948,20 @@ class Settings(BaseSettings):
     )
 
     # ----- Validators ---------------------------------------------------------
+    @field_validator("dnp3_smart_half_open_sec")
+    @classmethod
+    def _validate_smart_half_open(cls, v: int) -> int:
+        """0 (kapali) VEYA 120..86400. FAIL-CLOSED.
+
+        Daha kisa bir esik, cihaz unsolicited rapor gonderirken bile saglikli
+        bir oturumu yikabilirdi.
+        """
+        if v == 0 or 120 <= v <= 86400:
+            return v
+        raise ValueError(
+            f"DNP3_SMART_HALF_OPEN_SEC={v} gecersiz. Kabul edilen: 0 (kapali) veya 120..86400 saniye."
+        )
+
     @field_validator("dnp3_smart_max_silence_sec")
     @classmethod
     def _validate_smart_max_silence(cls, v: int) -> int:

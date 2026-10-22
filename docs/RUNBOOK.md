@@ -260,7 +260,16 @@ Get-Content "$env:ProgramData\EnerjiOne\dnp3-gateway\GW-001.log" -Tail 200 -Wait
 | `dnp3_event_buffer_overflow device=..` | **Outstation olay tamponu doldu ve OLAYLARI DUSURDU** — telemetride aciklik olusmus olabilir | ERROR |
 | `dnp3_device_restart device=..` | Outstation yeniden basladi | WARNING |
 | `dnp3_need_time device=..` | Cihaz saat yazilmasini bekliyor | INFO |
-| `dnp3_time_sync_suspended device=..` | Gateway saati guvenilmez; cihaza saat YAZILMIYOR | ERROR |
+| `dnp3_time_sync_suspended device=.. sebep=..` | Gateway saati dogrulanmadi (`clock_unknown`, WARNING) ya da sapmis (`clock_unsafe`, ERROR); master zaman gorevi OLMADAN kuruldu, cihaza saat YAZILMIYOR | WARNING/ERROR |
+| `dnp3_time_sync_resumed device=..` | Saat guvenli; master yeniden kuruldu, zaman yazimi acildi | INFO |
+| `dnp3_time_sync_master_rebuild device=.. time_sync=a->b` | Saat korumasi durumu degisti; zaman senkronu master yeniden kurularak uygulandi | WARNING |
+| `dnp3_time_sync_enable_deferred device=..` | Saat guvenli ama Smart oturumu acik; zaman yazimi oturum kapaninca acilacak | INFO |
+| `dnp3_time_sync_write device=.. value=.. method=..` | Cihaza yazilan zaman (ISO UTC) ve yontem. Deger gercek saatten farkliysa ARIZA | INFO |
+| `dnp3_time_sync_ok` / `dnp3_time_sync_failed device=..` | Cihaz zaman yazimini kabul etti / etmedi | INFO / WARNING |
+| `dnp3_time_sync_delay_clamped device=..` | NonLAN gecikme telafisi tolerans disina cikacakti; telafisiz guncel zaman yazildi | ERROR |
+| `dnp3_time_sync_invalid_value device=..` | **Yazilacak zaman gecersiz** (2001 oncesi ya da gercek UTC'den >5 sn sapma) | ERROR |
+| `smart_half_open_suspected device=.. link_age=.. evidence_age=..` | Smart oturumu acik gorunuyor ama cihaz `DNP3_SMART_HALF_OPEN_SEC` boyunca sessiz; TCP yari-acik sayildi, oturum kapanmis gibi islenip yalnizca o cihazin master'i yeniden kuruldu. Sik goruluyorsa cihazin hucresel hattini ve politikasini (Boost cihaz `smart` mi?) kontrol edin | WARNING |
+| `dnp3_time_sync_lan_on_horstmann device=..` | Horstmann profilli cihazda `DNP3_TIME_SYNC=lan` — cihaz FC=24/G50V3 desteklemez, `nonlan` kullanin | WARNING |
 | `dnp3_device_clock_invalid device=..` | **Cihazin KENDI RTC'si makul araligin disinda** (sahada gorulen: 2066). Olcumler ETKILENMEZ ve cihaz kopuk SAYILMAZ; yalnizca cihazin kendi olay damgasina guvenilmez. Senkronizasyon TALEP GUDUMLU oldugu icin cihaz NEED_TIME bildirmiyorsa **kendiliginden duzelmez** | WARNING |
 | `dnp3_device_clock_need_time device=..` | Cihaz IIN1.4 ile saat istiyor; `DNP3_TIME_SYNC` acikken yazilmasi beklenir | INFO |
 | `dnp3_device_clock_recovered device=..` | Cihaz saati normale dondu | INFO |
@@ -610,8 +619,9 @@ clock_skew_unsafe skew_sec=45.2 — ... DNP3 zaman senkronizasyonu DURDURULDU
 dnp3_time_sync_suspended device=DEV-042
 ```
 
-Gateway saati backend'den >=30sn sapinca outstation'lara saat **yazilmaz**
-(yanlis saati 300 cihaza yazmaktansa hic yazmamak yeglenir).
+Gateway saati backend'den >=30sn sapinca master'lar zaman gorevi olmadan
+yeniden kurulur ve outstation'lara saat **yazilmaz** (yanlis saati 300
+cihaza yazmaktansa hic yazmamak yeglenir).
 
 ```powershell
 w32tm /query /status
