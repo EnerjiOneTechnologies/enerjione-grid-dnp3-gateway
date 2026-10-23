@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
-  "gateway_release": "1.16.0",
-  "gateway_source_ref": "v1.16.0",
+  "gateway_release": "1.17.0",
+  "gateway_source_ref": "v1.17.0",
   "gateway_source_sha": "ae9f00df10edd36b9106ba1c0efaa6b8871c801e",
   "gateway_source_sha_semantics": "BU DOSYADAKI DEGER, KENDISINI ICEREN COMMIT DEGILDIR ve olamaz: dosyaya yeni SHA yazmak yeni bir commit uretir ve SHA yeniden degisir (self-referential). Buradaki deger, bu sozlesmenin turetildigi YAYIMLANMIS BASELINE surumun commit'idir. Bir artifact'in GERCEK revizyonu iki yerde yasar ve ikisi de release sirasinda uretilir: (1) imaj etiketi org.opencontainers.image.revision=<GITHUB_SHA>, (2) release workflow'un urettigi gateway-deployment-contract.generated.json (gateway_source_sha alani GITHUB_SHA ile doldurulur). Tuketiciler revizyon icin BUNLARA bakmali; kaynak dosyadaki deger yalnizca baseline'dir.",
   "owner": "EnerjiOneTechnologies/enerjione-grid-dnp3-gateway",

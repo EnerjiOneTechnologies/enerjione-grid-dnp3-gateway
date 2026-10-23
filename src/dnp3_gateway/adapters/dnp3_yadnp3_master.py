@@ -712,6 +712,9 @@ class _DeviceCache:
         # Mevcut link oturumunun acilis damgasi (monotonic). Taze bir oturumu
         # zorla yikmamak icin okunur; bkz. `link_age`.
         self._link_opened_at = 0.0
+        #: Bu oturumda cihaza zaman yazildi mi (kutuphane gorevi ya da
+        #: proaktif yazim)? Ikinci bir yazimi onler. `monotonic` damgasi.
+        self._zaman_yazildi_at = 0.0
         #: CIHAZ RTC GOZLEMI (1.15.1). Cihazin KENDI damgasi + gateway
         #: saatiyle farki. Olcum ASLA atilmaz; bu alanlar yalnizca
         #: "damgaya guvenilir mi" sorusunu cevaplar.
@@ -1067,6 +1070,14 @@ class _DeviceCache:
             prev = self._iin_flags.get(name)
             self._iin_flags[name] = value
             return prev != value
+
+    def note_time_write(self) -> None:
+        """Cihaza zaman yazildi (ya da yazilmak uzere gonderildi)."""
+        self._zaman_yazildi_at = time.monotonic()
+
+    def time_written_this_session(self) -> bool:
+        """Mevcut link oturumunda zaten zaman yazildi mi?"""
+        return self._link_opened_at > 0.0 and self._zaman_yazildi_at >= self._link_opened_at
 
     def iin_snapshot(self) -> dict[str, bool]:
         with self._lock:
@@ -2076,6 +2087,7 @@ def _make_master_app(
                 if yontem is not None:
                     self._zaman_gorevi = None
                     if sonuc_adi == "SUCCESS":
+                        cache.note_time_write()
                         logger.info(
                             "dnp3_time_sync_ok device=%s method=%s — cihaz zaman yazimini kabul etti",
                             device_code,
@@ -3004,6 +3016,63 @@ class _ManagedMaster(_OturumDurumu):
             }
         return cls._OP_MAP_LAZY
 
+    def zaman_yaz_proaktif(self, yapilandirilan: str) -> bool:
+        """Cihaz ISTEMESE de G50V1 WRITE ile gercek UTC yazar. Yazildiysa True.
+
+        NEDEN: kutuphanenin zaman gorevi YALNIZCA cihaz IIN1.4 (NEED_TIME)
+        bildirince calisir. Saati bozulmus (ornegin +39 yil) bir Horstmann
+        saat istemeyince hic duzeltilmiyor ve Dial-In zamanlamasi o bozuk
+        saate gore kayiyordu. Kullanicinin saha test aracinda dogrulanan
+        cerceve: FC=02 WRITE, `32 01 07 01` + 6 bayt UTC ms (little-endian).
+
+        DEGISMEZLER (1.16.0 ile ayni):
+          * saat korumasi `safe` degilse ya da DNP3_TIME_SYNC=none ise YAZILMAZ;
+          * 2001 oncesi deger YAZILMAZ — kutuphane gorevinden farkli olarak
+            burada veto MUMKUN.
+        Hata atmaz: saat yazilamamasi oturumu bozmamali.
+        """
+        try:
+            etkin, durum = _etkin_zaman_senkronu(yapilandirilan)
+            if etkin == "none":
+                logger.info(
+                    "dnp3_time_write_skipped device=%s sebep=%s — saat korumasi ya da "
+                    "DNP3_TIME_SYNC=none; cihaza zaman YAZILMADI",
+                    self.device.code,
+                    durum if durum != "-" else "time_sync_none",
+                )
+                return False
+            # Gercek UTC'ye yakinlik saat korumasiyla saglanir (`safe` = backend
+            # saatiyle olculen sapma esik altinda); burada son savunma olarak
+            # 2001 oncesi deger reddedilir.
+            deger_ms, kaynak = _saat_tahmini_ms()
+            if deger_ms < _GECERLI_ZAMAN_ALT_SINIR_MS:
+                logger.error(
+                    "dnp3_time_write_vetoed device=%s value=%s source=%s — gecersiz deger, cihaza YAZILMADI",
+                    self.device.code,
+                    _iso_utc(deger_ms),
+                    kaynak,
+                )
+                return False
+            govde = bytes([50, 1, 0x07, 0x01]) + int(deger_ms & 0xFFFFFFFFFFFF).to_bytes(6, "little")
+            self.cache.note_time_write()
+            self._master.PerformFunction(
+                "e1_zaman_yaz",
+                opendnp3.FunctionCode.WRITE,
+                [opendnp3.Header.Raw(govde)],
+                opendnp3.TaskConfig.Default(),
+            )
+            logger.info(
+                "dnp3_time_write_session device=%s value=%s source=%s — oturum basi "
+                "saat yazimi (cihaz istemese de)",
+                self.device.code,
+                _iso_utc(deger_ms),
+                kaynak,
+            )
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("dnp3_time_write_session_error device=%s", self.device.code)
+            return False
+
     def operate_crob(
         self,
         *,
@@ -3235,6 +3304,7 @@ class Yadnp3TelemetryReader(TelemetryReader):
         smart_max_silence_sec: int | None = None,
         session_store_path: str | None = None,
         smart_half_open_sec: int = _SMART_HALF_OPEN_SEC,
+        time_write_each_session: bool = True,
     ) -> None:
         if not _YADNP3_AVAILABLE:
             raise Yadnp3AdapterError(
@@ -3274,6 +3344,7 @@ class Yadnp3TelemetryReader(TelemetryReader):
             session_store_path=session_store_path,
             time_sync=time_sync,
             smart_half_open_sec=smart_half_open_sec,
+            time_write_each_session=time_write_each_session,
         )
 
     def _init_runtime_state(
@@ -3286,6 +3357,7 @@ class Yadnp3TelemetryReader(TelemetryReader):
         diagnostics: bool = True,
         time_sync: str = "nonlan",
         smart_half_open_sec: int = _SMART_HALF_OPEN_SEC,
+        time_write_each_session: bool = True,
     ) -> None:
         """NATIVE OLMAYAN tum calisma-zamani alanlarini kurar.
 
@@ -3308,6 +3380,8 @@ class Yadnp3TelemetryReader(TelemetryReader):
         #: `_smart_oturumu_yari_acik_mi`.
         self._smart_half_open_sec = max(0, int(smart_half_open_sec or 0))
         self._smart_yari_acik_total = 0
+        #: Dogrulanmis her oturumda saat yazilsin mi (`DNP3_TIME_WRITE_EACH_SESSION`).
+        self._zaman_her_oturum = bool(time_write_each_session)
         self._masters: dict[str, _ManagedMaster] = {}
         # Lock granulariteyi azaltmak icin double-check pattern: lock disinda
         # hizli dict lookup; sadece master OLUSTURURKEN lock alinir.
@@ -5108,6 +5182,18 @@ class Yadnp3TelemetryReader(TelemetryReader):
                 device.ip_address,
                 redirty_count,
             )
+            # Oturum DOGRULANDI (cihaz konusuyor): saati bir kez yaz. Smart'ta
+            # her uyanma yeni bir oturum; boylece saat her Dial-In'de tazelenir.
+            # Cihaz ZATEN saat istiyorsa (IIN1.4) kutuphanenin gorevi yazar;
+            # ikinci bir yazim gereksiz.
+            yaz = getattr(mm, "zaman_yaz_proaktif", None)
+            if (
+                getattr(self, "_zaman_her_oturum", False)
+                and callable(yaz)
+                and not mm.cache.iin_snapshot().get("need_time")
+                and not mm.cache.time_written_this_session()
+            ):
+                yaz(self._time_sync)
 
         return self._degisenleri_yayinla(mm, device, signals)
 

@@ -200,9 +200,9 @@ def _g50_varyasyonlari(istekler: list[bytes]) -> set[int]:
 
 
 class _ZamanIsteyenUygulama(opendnp3.IOutstationApplication):
-    def __init__(self) -> None:
+    def __init__(self, *, saat_ister: bool = True) -> None:
         super().__init__()
-        self.need_time = True
+        self.need_time = saat_ister
         self.yazilanlar: list[int] = []
         self.alis_anlari: list[float] = []
 
@@ -235,8 +235,8 @@ class _KomutIsleyici(opendnp3.ICommandHandler):
 class _Cihaz:
     """Horstmann taklidi (initiating): cihazin KENDISI master'a baglanir."""
 
-    def __init__(self, hedef_port: int, *, unsolicited: bool) -> None:
-        self.uygulama = _ZamanIsteyenUygulama()
+    def __init__(self, hedef_port: int, *, unsolicited: bool, saat_ister: bool = True) -> None:
+        self.uygulama = _ZamanIsteyenUygulama(saat_ister=saat_ister)
         self._manager = opendnp3.DNP3Manager(2)
         kanal = self._manager.AddOutstationTCPClient(
             "os_ch",
@@ -299,7 +299,14 @@ def saha(tmp_path, monkeypatch):
     kaynaklar: list[Any] = []
     geri_al: list[Any] = []
 
-    def kur(*, policy: str = "continuous", time_sync: str | None = None, profil: str = "horstmann_sn_2_0"):
+    def kur(
+        *,
+        policy: str = "continuous",
+        time_sync: str | None = None,
+        profil: str = "horstmann_sn_2_0",
+        saat_ister: bool = True,
+        her_oturum: bool | None = None,
+    ):
         monkeypatch.setenv("GATEWAY_MODE", "dnp3")
         monkeypatch.setenv("DNP3_LIBRARY", "yadnp3")
         monkeypatch.setenv("GATEWAY_STATE_DIR", str(tmp_path))
@@ -309,6 +316,10 @@ def saha(tmp_path, monkeypatch):
             monkeypatch.delenv("DNP3_TIME_SYNC", raising=False)
         else:
             monkeypatch.setenv("DNP3_TIME_SYNC", time_sync)
+        if her_oturum is None:
+            monkeypatch.delenv("DNP3_TIME_WRITE_EACH_SESSION", raising=False)
+        else:
+            monkeypatch.setenv("DNP3_TIME_WRITE_EACH_SESSION", "true" if her_oturum else "false")
         ayarlar = Settings(_env_file=None)  # type: ignore[call-arg]
         okuyucu = build_adapter(ayarlar)
         kaynaklar.append(okuyucu)
@@ -328,7 +339,7 @@ def saha(tmp_path, monkeypatch):
         proxy = _YakalayanProxy(gw_port)
         kaynaklar.append(proxy)
         okuyucu.read_device(device=cihaz_cfg, signals=SINYALLER)  # master'i kur
-        cihaz = _Cihaz(proxy.port, unsolicited=(policy == "smart"))
+        cihaz = _Cihaz(proxy.port, unsolicited=(policy == "smart"), saat_ister=saat_ister)
         kaynaklar.append(cihaz)
         return okuyucu, cihaz_cfg, cihaz, proxy, ayarlar
 
@@ -574,3 +585,88 @@ def test_lan_acikca_secilebilir_ve_horstmann_profilinde_uyarir(tmp_path, monkeyp
     finally:
         okuyucu.close()
         geri()
+
+
+# ==========================================================================
+# KABUL 1.17.0 — cihaz saat ISTEMESE de oturum basinda dogru UTC yazilir
+# ==========================================================================
+
+
+def _yokla(okuyucu, cihaz_cfg):
+    """Gateway'in ana dongusunu taklit eder: `read_device` periyodik cagrilir.
+
+    Oturum basi saat yazimi bu donguden (oturum dogrulandiginda) tetiklenir;
+    tek bir kurulum cagrisi yetmez. Donen olay set edilince dongu durur.
+    """
+    dur = threading.Event()
+
+    def dongu():
+        while not dur.is_set():
+            try:
+                okuyucu.read_device(device=cihaz_cfg, signals=SINYALLER)
+            except Exception:  # noqa: BLE001
+                pass
+            dur.wait(0.5)
+
+    threading.Thread(target=dongu, daemon=True).start()
+    return dur
+
+
+@pytest.mark.parametrize("policy", ["continuous", "smart"])
+def test_saat_istemeyen_cihaza_oturum_basinda_dogru_utc_yazilir(saha, saat_korumasi, caplog, policy):
+    """Saati bozuk (+39 yil) ama IIN1.4 bildirmeyen Horstmann: kutuphanenin
+    gorevi hic calismadigi icin saat duzelmiyordu. Oturum dogrulaninca tek bir
+    G50V1 WRITE gitmeli; FC=23 (gecikme olcumu) GITMEZ."""
+    saat_korumasi.observe_http_date(_date())
+    assert saat_korumasi.clock_state == "safe"
+    with caplog.at_level(logging.INFO, logger=ym.logger.name):
+        okuyucu, cihaz_cfg, cihaz, proxy, _ = saha(policy=policy, saat_ister=False)
+        assert cihaz.uygulama.need_time is False
+        dur = _yokla(okuyucu, cihaz_cfg)
+        try:
+            assert _bekle(lambda: cihaz.uygulama.yazilanlar, 30.0), (
+                "saat istemeyen cihaza oturum basinda saat YAZILMADI"
+            )
+            time.sleep(3.0)  # ayni oturumda IKINCI yazim olmamali
+        finally:
+            dur.set()
+
+    istekler = proxy.gw_istekleri()
+    g50v1 = _g50v1_degerleri(istekler)
+    assert len(g50v1) == 1, f"tam bir G50V1 yazmasi bekleniyordu: {g50v1}"
+    assert FC_DELAY_MEASURE not in [_fc(r) for r in istekler]
+    assert g50v1[0] == cihaz.uygulama.yazilanlar[0]
+    assert abs(g50v1[0] - cihaz.uygulama.alis_anlari[0]) <= 2000, (
+        f"yazilan {ym._iso_utc(g50v1[0])} gercek UTC degil"
+    )
+    mesajlar = [r.getMessage() for r in caplog.records]
+    assert any("dnp3_time_write_session" in m and f"device={KOD}" in m for m in mesajlar)
+
+
+def test_saat_istemeyen_cihaz_ayar_kapaliyken_yazilmaz(saha, saat_korumasi):
+    saat_korumasi.observe_http_date(_date())
+    okuyucu, cihaz_cfg, cihaz, proxy, _ = saha(saat_ister=False, her_oturum=False)
+    dur = _yokla(okuyucu, cihaz_cfg)
+    try:
+        assert _bekle(lambda: _bagli(okuyucu, cihaz_cfg), 20.0), "on kosul: cihaz baglanmali"
+        time.sleep(6.0)
+    finally:
+        dur.set()
+    assert _g50v1_degerleri(proxy.gw_istekleri()) == []
+    assert cihaz.uygulama.yazilanlar == []
+
+
+@pytest.mark.parametrize("durum", ["unknown", "unsafe"])
+def test_saat_istemeyen_cihaza_saat_guvensizken_yazilmaz(saha, saat_korumasi, durum):
+    if durum == "unsafe":
+        saat_korumasi.observe_http_date(_date(-(CLOCK_UNSAFE_SKEW_SEC + 60)))
+    assert saat_korumasi.clock_state == durum
+    okuyucu, cihaz_cfg, cihaz, proxy, _ = saha(saat_ister=False)
+    dur = _yokla(okuyucu, cihaz_cfg)
+    try:
+        assert _bekle(lambda: _bagli(okuyucu, cihaz_cfg), 20.0), "on kosul: cihaz baglanmali"
+        time.sleep(8.0)
+    finally:
+        dur.set()
+    assert _g50v1_degerleri(proxy.gw_istekleri()) == [], "saat guvensizken G50V1 YAZILDI"
+    assert cihaz.uygulama.yazilanlar == []
