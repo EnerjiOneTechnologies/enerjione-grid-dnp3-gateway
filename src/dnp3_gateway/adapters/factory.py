@@ -101,6 +101,7 @@ def build_adapter(settings: Settings) -> TelemetryReader:
             # firtinasi uretmesini onler (bkz. docs/HORSTMANN_SMART_MODE.md).
             smart_max_silence_sec=settings.dnp3_smart_max_silence_sec or None,
             smart_half_open_sec=settings.dnp3_smart_half_open_sec,
+            time_write_each_session=settings.dnp3_time_write_each_session,
             session_store_path=str(
                 Path(settings.gateway_state_dir) / f"session_state_{settings.gateway_code}.json"
             ),

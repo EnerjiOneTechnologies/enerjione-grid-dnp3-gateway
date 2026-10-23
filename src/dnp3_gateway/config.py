@@ -740,6 +740,18 @@ class Settings(BaseSettings):
             "KABUL: 0 (KAPALI) veya 120..86400. Varsayilan 900."
         ),
     )
+    dnp3_time_write_each_session: bool = Field(
+        default=True,
+        description=(
+            "SAAT HER OTURUMDA YAZILIR (1.17.0). Cihaz saat ISTEMESE bile "
+            "(IIN1.4 yok) dogrulanmis her oturumun basinda bir kez G50V1 WRITE "
+            "ile gercek UTC yazilir. Horstmann saati bozuldugunda (ornegin +39 "
+            "yil) saat istemedigi icin kutuphanenin zaman gorevi hic calismiyor "
+            "ve Dial-In zamanlamasi kayiyordu. Saat korumasi aynen gecerlidir: "
+            "gateway saati `safe` degilse YAZILMAZ. DNP3_TIME_SYNC=none ise "
+            "kapali. Varsayilan acik."
+        ),
+    )
 
     # ----- Cihaz basina calisma-zamani sagligi (G-DEVICE-HEALTH-01) --------
     # AYRI, GIDEN, GOVDE tabanli kanal. `X-E1-Gateway-Health` toplu basligini

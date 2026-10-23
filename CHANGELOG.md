@@ -2,7 +2,35 @@
 
 Semver'a gore tutulur. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.16.0] - 2026-10-22
+## [1.17.0] - 2026-10-23
+
+Cihaz saati artik **cihaz istemese de** her oturumda yazilir.
+
+### Added
+
+- **Oturum basi saat yazimi (`DNP3_TIME_WRITE_EACH_SESSION`, varsayilan
+  `true`).** Kutuphanenin zaman gorevi YALNIZCA cihaz IIN1.4 (NEED_TIME)
+  bildirince calisir. Sahada saati bozulmus (+39 yil) ama saat ISTEMEYEN bir
+  Horstmann hic duzeltilmiyordu; Dial-In zamanlamasi cihazin kendi saatine
+  bagli oldugu icin uyanma saatleri de kayiyordu. Artik dogrulanmis her
+  oturumda (Smart'ta her uyanma) bir kez FC=02 WRITE G50V1 ile gercek UTC
+  yazilir. Cerceve sahada calistigi dogrulanan test aracinin cercevesiyle
+  aynidir: `32 01 07 01` + 6 bayt UTC ms (little-endian).
+  - Saat korumasi aynen gecerli: gateway saati `safe` degilse ya da
+    `DNP3_TIME_SYNC=none` ise YAZILMAZ (`dnp3_time_write_skipped`).
+  - 2001 oncesi deger YAZILMAZ (`dnp3_time_write_vetoed`).
+  - Cihaz zaten saat istiyorsa (IIN1.4) kutuphanenin gorevi yazar; ikinci
+    yazim yapilmaz.
+  - Log: `dnp3_time_write_session device=... value=... source=...`.
+  - Gecikme olcumu (FC=23) yapilmaz; hata tek yonlu ag gecikmesi kadardir
+    (hucresel hatta tipik olarak < 1 sn).
+
+### Tests
+
+- Gercek yadnp3 outstation ile tel seviyesi: saat istemeyen cihaza tam bir
+  G50V1 ve dogru UTC; ayar kapaliyken ve saat guvensizken hic yazim yok;
+  saat isteyen cihazda yine tam bir yazim.
+
 
 Kritik duzeltme: **gateway cihazlara 1970-01-01 00:00:00.000 UTC yaziyordu.**
 Sahadaki belirti: Horstmann Smart Navigator 2.0 saati surekli 00:00'a
