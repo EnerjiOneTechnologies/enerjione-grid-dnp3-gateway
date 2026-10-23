@@ -712,6 +712,9 @@ class _DeviceCache:
         # Mevcut link oturumunun acilis damgasi (monotonic). Taze bir oturumu
         # zorla yikmamak icin okunur; bkz. `link_age`.
         self._link_opened_at = 0.0
+        #: Bu oturumda cihaza zaman yazildi mi (kutuphane gorevi ya da
+        #: proaktif yazim)? Ikinci bir yazimi onler. `monotonic` damgasi.
+        self._zaman_yazildi_at = 0.0
         #: CIHAZ RTC GOZLEMI (1.15.1). Cihazin KENDI damgasi + gateway
         #: saatiyle farki. Olcum ASLA atilmaz; bu alanlar yalnizca
         #: "damgaya guvenilir mi" sorusunu cevaplar.
@@ -1067,6 +1070,14 @@ class _DeviceCache:
             prev = self._iin_flags.get(name)
             self._iin_flags[name] = value
             return prev != value
+
+    def note_time_write(self) -> None:
+        """Cihaza zaman yazildi (ya da yazilmak uzere gonderildi)."""
+        self._zaman_yazildi_at = time.monotonic()
+
+    def time_written_this_session(self) -> bool:
+        """Mevcut link oturumunda zaten zaman yazildi mi?"""
+        return self._link_opened_at > 0.0 and self._zaman_yazildi_at >= self._link_opened_at
 
     def iin_snapshot(self) -> dict[str, bool]:
         with self._lock:
@@ -2076,6 +2087,7 @@ def _make_master_app(
                 if yontem is not None:
                     self._zaman_gorevi = None
                     if sonuc_adi == "SUCCESS":
+                        cache.note_time_write()
                         logger.info(
                             "dnp3_time_sync_ok device=%s method=%s — cihaz zaman yazimini kabul etti",
                             device_code,
@@ -3035,12 +3047,14 @@ class _ManagedMaster(_OturumDurumu):
             deger_ms, kaynak = _saat_tahmini_ms()
             if deger_ms < _GECERLI_ZAMAN_ALT_SINIR_MS:
                 logger.error(
-                    "dnp3_time_write_vetoed device=%s value=%s source=%s — gecersiz deger, "
-                    "cihaza YAZILMADI",
-                    self.device.code, _iso_utc(deger_ms), kaynak,
+                    "dnp3_time_write_vetoed device=%s value=%s source=%s — gecersiz deger, cihaza YAZILMADI",
+                    self.device.code,
+                    _iso_utc(deger_ms),
+                    kaynak,
                 )
                 return False
             govde = bytes([50, 1, 0x07, 0x01]) + int(deger_ms & 0xFFFFFFFFFFFF).to_bytes(6, "little")
+            self.cache.note_time_write()
             self._master.PerformFunction(
                 "e1_zaman_yaz",
                 opendnp3.FunctionCode.WRITE,
@@ -3050,7 +3064,9 @@ class _ManagedMaster(_OturumDurumu):
             logger.info(
                 "dnp3_time_write_session device=%s value=%s source=%s — oturum basi "
                 "saat yazimi (cihaz istemese de)",
-                self.device.code, _iso_utc(deger_ms), kaynak,
+                self.device.code,
+                _iso_utc(deger_ms),
+                kaynak,
             )
             return True
         except Exception:  # noqa: BLE001
@@ -5171,7 +5187,12 @@ class Yadnp3TelemetryReader(TelemetryReader):
             # Cihaz ZATEN saat istiyorsa (IIN1.4) kutuphanenin gorevi yazar;
             # ikinci bir yazim gereksiz.
             yaz = getattr(mm, "zaman_yaz_proaktif", None)
-            if getattr(self, "_zaman_her_oturum", False) and callable(yaz) and                     not mm.cache.iin_snapshot().get("need_time"):
+            if (
+                getattr(self, "_zaman_her_oturum", False)
+                and callable(yaz)
+                and not mm.cache.iin_snapshot().get("need_time")
+                and not mm.cache.time_written_this_session()
+            ):
                 yaz(self._time_sync)
 
         return self._degisenleri_yayinla(mm, device, signals)
