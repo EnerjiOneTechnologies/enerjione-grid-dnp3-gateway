@@ -384,7 +384,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Docker image. Verilmezse VERSION dosyasindan EXACT semver turetilir "
-            "(orn. ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:1.17.0). Uretim ciktisi bilerek `:latest`e BAGLANMAZ."
+            "(orn. ghcr.io/enerjionetechnologies/enerjione-grid-dnp3-gateway:1.18.0). Uretim ciktisi bilerek `:latest`e BAGLANMAZ."
         ),
     )
     p.add_argument(

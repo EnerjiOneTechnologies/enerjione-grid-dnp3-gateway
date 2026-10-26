@@ -1,7 +1,7 @@
 {
   "contract_version": 1,
-  "gateway_release": "1.17.0",
-  "gateway_source_ref": "v1.17.0",
+  "gateway_release": "1.18.0",
+  "gateway_source_ref": "v1.18.0",
   "gateway_source_sha": "ae9f00df10edd36b9106ba1c0efaa6b8871c801e",
   "gateway_source_sha_semantics": "BU DOSYADAKI DEGER, KENDISINI ICEREN COMMIT DEGILDIR ve olamaz: dosyaya yeni SHA yazmak yeni bir commit uretir ve SHA yeniden degisir (self-referential). Buradaki deger, bu sozlesmenin turetildigi YAYIMLANMIS BASELINE surumun commit'idir. Bir artifact'in GERCEK revizyonu iki yerde yasar ve ikisi de release sirasinda uretilir: (1) imaj etiketi org.opencontainers.image.revision=<GITHUB_SHA>, (2) release workflow'un urettigi gateway-deployment-contract.generated.json (gateway_source_sha alani GITHUB_SHA ile doldurulur). Tuketiciler revizyon icin BUNLARA bakmali; kaynak dosyadaki deger yalnizca baseline'dir.",
   "owner": "EnerjiOneTechnologies/enerjione-grid-dnp3-gateway",
@@ -138,6 +138,7 @@
       "session_policy",
       "smart_max_silence_sec",
       "dial_in_interval_min",
+      "dial_in_anchor_min_utc",
       "smart_listen_reconnect_max_sec"
     ],
     "session_policy_values": [
@@ -262,7 +263,10 @@
     "smart_no_telemetry_age_comm_lost": true,
     "smart_no_telemetry_age_comm_lost_rationale": "Bayatlik esigi scan_interval/baseline_interval'den turetilir ve ortuk varsayimi 'saglikli cihaz her tarama turunda cevap verir'dir. Bu varsayim SUREKLI politikaya aittir; smart'ta tarama YOKTUR, dolayisiyla KANITLANMIS ve SAGLIKLI bir oturum esik kadar sonra GARANTILI olarak bayat olur ve sahte comm_lost uretir (sahada 120sn'de gorulduu). Smart bir oturum online'dan YALNIZCA link kapanmasi ya da smart_max_silence_sec ile cikar. Uzun vadeli 'cihaz kayip mi' olcutu Dial-In + sessizlik esigidir, olcum yasi DEGILDIR. CONTINUOUS'ta bayatlik davranisi AYNEN korunur.",
     "recovery_proof_boundary": "evidence_generation: her gecerli DNP3 kaniti (olcum ya da IIN/gorev basarisi) bir sayaci artirir. fail_recovery o andaki nesli kaydeder; lost -> recovering gecisi ancak nesil ARTMIS ise (ya da YENI link acilisi olmussa) izinlidir. Boylece ESKI bir kare recovery'yi tekrar tetikleyemez ve sahada gorulen deterministik ~15 saniyelik lost/relink salinimi IMKANSIZ olur. SAYAC kullanilir, zaman damgasi DEGIL: time.monotonic() Windows'ta ~15.6ms cozunurluklu ve fail_recovery ile hemen ardindan gelen gercek bir kanit ayni tick'e dusebiliyor.",
-    "smart_wake_comm_lost_deferral": "bounded_by_grace: smart bir cihaz uyandiginda recovering sirasinda comm_lost ERTELENIR (bastirilmaz). Erteleme recovery_age'e DEGIL AYRI bir damgaya baglidir: link FLAP ederse her OnOpen recovery_age'i sifirlar ve bozuk bir cihaz SONSUZA KADAR gizlenirdi. Damga yalnizca GERCEK online gecisinde sifirlanir; grace dolunca comm_lost YAYINLANIR. CONTINUOUS'ta recovering sirasinda comm_lost tutma davranisi DEGISMEDI."
+    "smart_wake_comm_lost_deferral": "bounded_by_grace: smart bir cihaz uyandiginda recovering sirasinda comm_lost ERTELENIR (bastirilmaz). Erteleme recovery_age'e DEGIL AYRI bir damgaya baglidir: link FLAP ederse her OnOpen recovery_age'i sifirlar ve bozuk bir cihaz SONSUZA KADAR gizlenirdi. Damga yalnizca GERCEK online gecisinde sifirlanir; grace dolunca comm_lost YAYINLANIR. CONTINUOUS'ta recovering sirasinda comm_lost tutma davranisi DEGISMEDI.",
+    "dial_in_anchor_min_utc_range": "0..1439",
+    "dial_in_anchor_min_utc_default": null,
+    "dial_in_anchor_semantics": "1.18.0: Dial-In IZGARASININ UTC gun icindeki baslangici (dakika). Horstmann 'Enable Dial-In Settings' acikken cihaz her gun Hour:Minute (UTC) aninda ve oradan dial_in_interval_min adimlariyla arar; plan disi uyanma (Wake-up bayrakli nokta) izgarayi KAYDIRMAZ. Dolu ise beklenen rapor izgaradaki bir sonraki centiktir: son temas bir plan aninin -300..+900 sn icindeyse o raporun kendisi sayilir ve bir sonraki centik beklenir, degilse izgaradaki ilk sonraki centik. Sure olarak hesaplanip MONOTONIK sessizlik yasiyla kiyaslanir. null/eksik = 1.17.0 davranisi (son temas + aralik). Gecersiz deger (aralik disi/bozuk) yok sayilir, config DUSMEZ. late/lost ayrimi ve smart_max_silence_sec DEGISMEDI."
   },
   "initiating_endpoint": {
     "why": "ip_endpoint_type=initiating cihazlarda baglantiyi CIHAZ baslatir. Gateway container ICINDE cihazin master_ip_port degerini dinler; bridge ag modunda o port host'a acilmazsa cihaz baglanamaz.",

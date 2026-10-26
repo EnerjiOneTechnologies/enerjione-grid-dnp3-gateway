@@ -44,6 +44,7 @@ from dnp3_gateway.command_parameters import (
     HORSTMANN_OP_TYPES,
     validate_command_parameters,
 )
+from dnp3_gateway.dial_in_plan import plana_kalan_sure
 from dnp3_gateway.operation_mode import (
     MODE_BOOST,
     MODE_SMART,
@@ -4582,7 +4583,35 @@ class Yadnp3TelemetryReader(TelemetryReader):
         if not limit:
             return None, False
         yas = self._sessizlik_yasi(mm)
-        return yas - limit, yas > limit
+        beklenen = self._beklenen_rapor_suresi(mm, device, limit)
+        return yas - beklenen, yas > beklenen
+
+    @staticmethod
+    def _dial_in_capa_sn(device: DeviceConfig) -> int | None:
+        """Dial-In izgarasinin UTC gun icindeki baslangici (saniye); yoksa None.
+
+        Disk onbellegi yolu parser'i atladigi icin aralik burada da
+        dogrulanir (bkz. `_dial_in_limit_sn`).
+        """
+        dakika = exact_int(getattr(device, "dial_in_anchor_min_utc", None))
+        if dakika is None or not (0 <= dakika <= 1439):
+            return None
+        return dakika * 60
+
+    def _beklenen_rapor_suresi(self, mm: _ManagedMaster, device: DeviceConfig, limit: int) -> float:
+        """Son temastan beklenen ilk planli rapora kalan sure (saniye).
+
+        Izgara biliniyorsa (1.18.0) izgaradaki bir sonraki centik: plan disi
+        bir uyanma beklentiyi KAYDIRMAZ. Bilinmiyorsa ya da hic temas yoksa
+        1.17.0 davranisi: `limit` (son temas / kurulus + aralik). Gecikme
+        karari, saglik raporundaki `next_expected_report_epoch` ve log AYNI
+        degeri kullanir — ikisi ayrisirsa ekran baska, alarm baska soylerdi.
+        """
+        capa = self._dial_in_capa_sn(device)
+        son = mm.cache.last_valid_contact_wall()
+        if capa is None or not son:
+            return float(limit)
+        return plana_kalan_sure(son, limit, capa)
 
     def _smart_idle_denetle(
         self, mm: _ManagedMaster, device: DeviceConfig, *, connected: bool = False
@@ -5434,7 +5463,7 @@ class Yadnp3TelemetryReader(TelemetryReader):
                 gecikme_sn: float | None = None
                 if dial_in:
                     capa = son_temas_wall or mm.olusturuldu_wall
-                    sonraki_rapor = capa + dial_in
+                    sonraki_rapor = capa + self._beklenen_rapor_suresi(mm, mm.device, dial_in)
                     fark = time.time() - sonraki_rapor
                     gecikme_sn = round(fark, 1) if fark > 0 else 0.0
 
@@ -5487,6 +5516,7 @@ class Yadnp3TelemetryReader(TelemetryReader):
                     # `state` bu yuzden `smart_idle` kalir: durum makinesi
                     # sondalardan ve gecikmeden ETKILENMEZ.
                     "dial_in_interval_min": getattr(mm.device, "dial_in_interval_min", None),
+                    "dial_in_anchor_min_utc": getattr(mm.device, "dial_in_anchor_min_utc", None),
                     "next_expected_report_epoch": sonraki_rapor,
                     "report_overdue_sec": gecikme_sn,
                     "report_late": bool(mm.rapor_gecikti),

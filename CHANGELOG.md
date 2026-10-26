@@ -2,6 +2,37 @@
 
 Semver'a gore tutulur. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.18.0] - 2026-10-26
+
+Dial-In beklentisi cihazin **sabit izgarasina** gore.
+
+### Added
+
+- **`dial_in_anchor_min_utc` (cihaz config alani, 0..1439).** Horstmann
+  kilavuzu (Smart Navigator 2.0, 104101-2038V2, 4.4.1): "Enable Dial-In
+  Settings" acikken cihaz her gun Dial-In Hour (UTC):Minute aninda ve oradan
+  Dial-In Interval adimlariyla arar; plan disi uyanma (Wake-up bayrakli bir
+  nokta degisince) izgarayi KAYDIRMAZ. Saha: 00:59 UTC + 180 dk -> 00:59 /
+  03:59 / 06:59 / 09:59 ...
+  - 1.17.0'a kadar beklenen rapor "son temas + aralik" idi: 08:25'teki plan
+    disi bir uyanmadan sonra 11:25 bekleniyordu, cihaz ise 09:59'da arar.
+    Yanlis alarm uretmez ama 09:59 aramasi kacarsa gecikme 11:25+'e kadar
+    fark edilmezdi. Izgara biliniyorsa beklenen an izgaradaki bir sonraki
+    centiktir (`report_late`, `next_expected_report_epoch`).
+  - Son temas bir plan aninin -5 / +15 dk icindeyse o planli raporun
+    kendisi sayilir (cihaz saati sapmasi, modem kaydi gecikmesi).
+  - Sure olarak hesaplanir ve MONOTONIK sessizlik yasiyla kiyaslanir: NTP
+    sicramasi filoyu "gecikmis" gostermez.
+  - Alan yoksa davranis 1.17.0 ile birebir aynidir. `smart_max_silence_sec`
+    (kopus esigi) ve late/lost ayrimi DEGISMEDI.
+  - Saglik kaydina `dial_in_anchor_min_utc` eklendi (yalnizca tanilama).
+
+### Tests
+
+- `tests/test_dial_in_izgara.py`: planli rapor, plan disi uyanma, cihaz
+  saati erken/gec, gunluk aralik, gecersiz onbellek degeri, alan yoksa
+  1.17.0 davranisi.
+
 ## [1.17.0] - 2026-10-23
 
 Cihaz saati artik **cihaz istemese de** her oturumda yazilir.
