@@ -25,6 +25,7 @@ Tasarim:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import threading
@@ -49,6 +50,14 @@ except ImportError:  # pragma: no cover - optional dev fallback
     NATS_AVAILABLE = False
 
 
+try:
+    from nats import errors as _nats_errors  # type: ignore[import-not-found]
+    from nats.js import errors as _js_errors  # type: ignore[import-not-found]
+except Exception:  # noqa: BLE001 - nats kurulu degilse publisher zaten calismaz
+    _nats_errors = None
+    _js_errors = None
+
+
 class JetStreamPublishError(Exception):
     """JetStream publish basarisiz oldu — outbox'a yazilir, retrier yeniden dener."""
 
@@ -60,6 +69,43 @@ class JetStreamNotReadyError(JetStreamPublishError):
     su an hazir degil". OutboxRetrier bu hatayi gorunce retry_count'u
     ARTIRMAMALIDIR (aksi takdirde NATS uzun outage'inda mesajlar dead-
     letter'a sessizce migre olur). Sadece backoff'a gecip beklemeli."""
+
+    # `errors.is_transient` bu ozniteligi okur. Oznitelik YOKKEN sinif
+    # KALICI sayiliyordu: 1.17.0'a kadar ~90 dk'lik bir NATS kesintisi tum
+    # kuyrugu dead-letter'a tasiyordu (yerel modda HTTP yedegi yok -> kayip).
+    transient = True
+
+
+#: Loop'tan donen, baglanti/zaman asimi anlamina gelen yerel hata tipleri.
+#: Python 3.10'da `concurrent.futures.TimeoutError` ve `asyncio.TimeoutError`
+#: yerlesik `TimeoutError`dan AYRI siniflardir; 3.11+ ayni sinif.
+_GECICI_YEREL_HATALAR: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    ConnectionError,
+    OSError,
+    concurrent.futures.TimeoutError,
+    asyncio.TimeoutError,
+)
+
+
+def _yayin_hatasina_cevir(exc: BaseException) -> JetStreamPublishError:
+    """Publish hatasini outbox'in siniflandirabilecegi tipe cevir.
+
+    GECICI (NotReady): zaman asimi, baglanti, NATS'in kendi baglanti-seviyesi
+    hatalari ve JetStream 503'u — mesajin icerigiyle ilgisi yok, kuyruk
+    bekler. KALICI: sunucunun istegi REDDETTIGI API hatasi (bozuk akis/konu)
+    ve diger her sey (serilestirme vb.) — retry sayaci artar, dead-letter.
+    Eskiden her hata ayrim yapilmadan KALICI sariliyordu.
+    """
+    gecici = isinstance(exc, _GECICI_YEREL_HATALAR)
+    if not gecici and _nats_errors is not None and isinstance(exc, _nats_errors.Error):
+        api_reddi = isinstance(exc, _js_errors.APIError) and not isinstance(
+            exc, _js_errors.ServiceUnavailableError
+        )
+        gecici = not api_reddi
+    if gecici:
+        return JetStreamNotReadyError(f"NATS erisilemez ya da yanit vermedi: {exc}")
+    return JetStreamPublishError(str(exc))
 
 
 class JetStreamPublisher:
@@ -429,7 +475,7 @@ class JetStreamPublisher:
         except Exception as exc:
             with self._counter_lock:
                 self._publish_failures += 1
-            raise JetStreamPublishError(str(exc)) from exc
+            raise _yayin_hatasina_cevir(exc) from exc
 
     def publish_batch(self, items: list[dict[str, Any]]) -> None:
         """Bir cihazin tum degisen sinyallerini TEK loop turunda PARALEL yayinla.
@@ -509,7 +555,7 @@ class JetStreamPublisher:
         except Exception as exc:
             with self._counter_lock:
                 self._publish_failures += len(items)
-            raise JetStreamPublishError(str(exc)) from exc
+            raise _yayin_hatasina_cevir(exc) from exc
 
         with self._counter_lock:
             self._publish_successes += len(items) - hatali

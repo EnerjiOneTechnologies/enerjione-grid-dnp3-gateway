@@ -517,6 +517,14 @@ def _outbox_snapshot(publisher: Any) -> dict[str, Any]:
     return snap
 
 
+#: Saglik HTTP soketi zaman asimi (sn). Baslik gondermeyen ya da govdeyi
+#: yarim birakan istemci (slowloris) is parcacigini SONSUZA kadar tutuyordu;
+#: ThreadingHTTPServer her baglantiya thread actigi icin ust sinir yoktu ve
+#: yeterince bagli-ama-sessiz soketle /health probe'u cevap veremiyordu
+#: (Docker healthcheck -> restart -> DNP3 oturumlari duser).
+HEALTH_SOCKET_TIMEOUT_SEC = 10.0
+
+
 def _make_handler(
     *,
     state: GatewayState,
@@ -575,6 +583,8 @@ def _make_handler(
     _trusted_networks = trusted_proxy_networks or []
 
     class _Handler(BaseHTTPRequestHandler):
+        timeout = HEALTH_SOCKET_TIMEOUT_SEC
+
         def _client_ip(self) -> str:
             """Gercek client IP'sini doner.
 

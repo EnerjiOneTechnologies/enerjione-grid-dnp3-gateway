@@ -44,7 +44,7 @@ from dnp3_gateway.command_parameters import (
     HORSTMANN_OP_TYPES,
     validate_command_parameters,
 )
-from dnp3_gateway.dial_in_plan import plana_kalan_sure
+from dnp3_gateway.dial_in_plan import GEC_SN, plana_kalan_sure
 from dnp3_gateway.operation_mode import (
     MODE_BOOST,
     MODE_SMART,
@@ -4584,7 +4584,13 @@ class Yadnp3TelemetryReader(TelemetryReader):
             return None, False
         yas = self._sessizlik_yasi(mm)
         beklenen = self._beklenen_rapor_suresi(mm, device, limit)
-        return yas - beklenen, yas > beklenen
+        # Izgara biliniyorsa centige GEC_SN tolerans. Cihaz her aramada
+        # centikten birkac dakika SONRA baglanir (modem kaydi, GSM); 1.17.0'da
+        # referans son temas oldugundan bu pay ortuktu, izgara onu kaldirdi.
+        # Toleranssiz her aralikta sahte `overdue` + ICMP sondasi + saglik
+        # dalgasi uretiyordu. `plana_kalan_sure` zaten ayni payla centik secer.
+        tolerans = GEC_SN if self._dial_in_capa_sn(device) is not None else 0
+        return yas - beklenen, yas > beklenen + tolerans
 
     @staticmethod
     def _dial_in_capa_sn(device: DeviceConfig) -> int | None:

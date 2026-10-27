@@ -26,12 +26,40 @@ Dial-In beklentisi cihazin **sabit izgarasina** gore.
   - Alan yoksa davranis 1.17.0 ile birebir aynidir. `smart_max_silence_sec`
     (kopus esigi) ve late/lost ayrimi DEGISMEDI.
   - Saglik kaydina `dial_in_anchor_min_utc` eklendi (yalnizca tanilama).
+  - Gecikme bayragi centige 15 dk toleransla duser: cihaz her aramada
+    centikten birkac dakika SONRA baglanir (modem kaydi, GSM); 1.17.0'da
+    referans son temas oldugundan bu pay ortuktu. Toleranssiz her aralikta
+    sahte `smart_report_overdue` + ICMP sondasi + saglik dalgasi uretiyordu.
+    Izgara yoksa karar 1.17.0 ile birebir ayni.
+
+### Fixed
+
+- **NATS kesintisi kuyrugu siliyordu.** `JetStreamNotReadyError` ve
+  loop'tan donen zaman asimi/baglanti hatalari outbox tarafindan KALICI
+  siniflaniyordu (sinif `transient` tasimiyordu; docstring tersini
+  soyluyordu): her satirin retry sayaci artiyor, ~90 dk sonra tum kuyruk
+  dead-letter'a tasiniyor ve 50.000 satirda budaniyordu — yerel modda
+  (HTTP yedegi yok) kalici kayip, kimse fark etmiyordu. Artik zaman asimi,
+  baglanti, NATS baglanti-seviyesi hatalari ve JetStream 503 GECICI: kuyruk
+  bekler, NATS gelince akar. Sunucunun istegi reddettigi API hatalari
+  (bozuk akis/konu) ve serilestirme hatalari KALICI kalir.
+- **Saglik HTTP isleyicisine soket zaman asimi (10 sn).** Baslik
+  gondermeyen istemci is parcacigini sonsuza kadar tutuyordu;
+  `ThreadingHTTPServer` ust sinirsiz thread actigi icin yeterince sessiz
+  baglantiyla `/health` cevap veremiyor, Docker healthcheck konteyneri
+  yeniden baslatiyor, DNP3 oturumlari dusuyordu.
+- Linux py311 kilidi: `certifi` 2026.7.22 -> 2026.10.23, `urllib3` 2.7.0 ->
+  2.8.0 (yayinlanmis guvenlik duzeltmeleri; baska pin degismedi).
 
 ### Tests
 
 - `tests/test_dial_in_izgara.py`: planli rapor, plan disi uyanma, cihaz
   saati erken/gec, gunluk aralik, gecersiz onbellek degeri, alan yoksa
-  1.17.0 davranisi.
+  1.17.0 davranisi; gecikme toleransi (centik+3 dk gecikmis degil, +15 dk
+  sonra gecikmis, izgarasiz 1.17.0 karari).
+- `tests/test_outbox_retrier.py`: gercek JetStream tipleriyle siniflandirma
+  ve NATS kesintisinde kuyrugun yerinde kalmasi.
+- `tests/test_operate_endpoint.py`: sessiz baglanti zaman asiminda kapanir.
 
 ## [1.17.0] - 2026-10-23
 

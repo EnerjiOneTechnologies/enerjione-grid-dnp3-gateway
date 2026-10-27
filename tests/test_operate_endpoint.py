@@ -404,3 +404,16 @@ def test_yetkisiz_komut_command_id_yi_tuketmez(sunucu) -> None:
     assert status == 200
     assert govde["ok"] is True
     assert len(reader.calls) == 1
+
+
+def test_baslik_gondermeyen_istemci_soketi_kapatilir(sunucu) -> None:
+    """Slowloris: baglanip hic bir sey gondermeyen istemci is parcacigini
+    sonsuza kadar tutmamali (HEALTH_SOCKET_TIMEOUT_SEC sonra kapanir)."""
+    import socket
+
+    from dnp3_gateway.health_server import HEALTH_SOCKET_TIMEOUT_SEC
+
+    _tutucu, port = sunucu
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+        s.settimeout(HEALTH_SOCKET_TIMEOUT_SEC + 10)
+        assert s.recv(1) == b"", "sunucu sessiz baglantiyi kapatmali"

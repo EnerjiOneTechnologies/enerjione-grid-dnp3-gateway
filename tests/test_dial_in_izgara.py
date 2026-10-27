@@ -96,3 +96,48 @@ def test_onbellekten_gelen_gecersiz_capa_yok_sayilir():
     # Disk onbellegi parser'i atlar; 5000 dk gibi bir deger izgara sayilmaz.
     cihaz = replace(make_device("IZG-4"), dial_in_anchor_min_utc=5000)
     assert mod.Yadnp3TelemetryReader._dial_in_capa_sn(cihaz) is None
+
+
+# ---- gecikme bayragi: centige tolerans ----------------------------------
+# Cihaz her aramada centikten birkac dakika SONRA baglanir (modem kaydi). 1.17
+# referans son temas oldugu icin bunu sorun etmiyordu; izgara toleranssiz
+# her aralikta sahte `overdue` uretiyordu.
+
+
+def _gecikme_okuyucu(monkeypatch, son_temas_wall: float, simdi_wall: float, capa: int | None):
+    okuyucu = object.__new__(mod.Yadnp3TelemetryReader)
+    mono_son = 1_000.0
+    mm = SimpleNamespace(
+        cache=SimpleNamespace(
+            last_valid_contact_wall=lambda: son_temas_wall,
+            last_valid_contact=lambda: mono_son,
+        ),
+        olusturuldu_wall=son_temas_wall,
+    )
+    monkeypatch.setattr(mod.time, "monotonic", lambda: mono_son + (simdi_wall - son_temas_wall))
+    cihaz = replace(make_device("IZG-T"), dial_in_interval_min=180, dial_in_anchor_min_utc=capa)
+    return okuyucu, mm, cihaz
+
+
+def test_centikten_birkac_dakika_sonra_baglanan_cihaz_gecikmis_sayilmaz(monkeypatch):
+    # 06:59 centigine 07:02'de bagland; 09:59 centigine yine ~3 dk gec kalacak.
+    okuyucu, mm, cihaz = _gecikme_okuyucu(monkeypatch, _an(7, 2), _an(10, 3), 59)
+    gecikme, gecikti = okuyucu._rapor_gecikmesi(mm, cihaz)
+    assert gecikme == _an(10, 3) - _an(9, 59)
+    assert gecikti is False
+
+
+def test_toleransin_otesinde_gecikme_yine_yakalanir(monkeypatch):
+    # Centik 09:59, tolerans 15 dk -> sinir 10:14.
+    okuyucu, mm, cihaz = _gecikme_okuyucu(monkeypatch, _an(7, 2), _an(10, 14), 59)
+    assert okuyucu._rapor_gecikmesi(mm, cihaz)[1] is False
+    okuyucu, mm, cihaz = _gecikme_okuyucu(monkeypatch, _an(7, 2), _an(10, 14, 1), 59)
+    assert okuyucu._rapor_gecikmesi(mm, cihaz)[1] is True
+
+
+def test_izgara_yoksa_117_gecikme_karari_degismez(monkeypatch):
+    # Referans son temas + aralik; tolerans eklenmez (davranis birebir 1.17).
+    okuyucu, mm, cihaz = _gecikme_okuyucu(monkeypatch, _an(7, 2), _an(10, 2), None)
+    assert okuyucu._rapor_gecikmesi(mm, cihaz)[1] is False
+    okuyucu, mm, cihaz = _gecikme_okuyucu(monkeypatch, _an(7, 2), _an(10, 2, 1), None)
+    assert okuyucu._rapor_gecikmesi(mm, cihaz)[1] is True
