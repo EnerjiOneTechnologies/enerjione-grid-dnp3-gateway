@@ -629,8 +629,12 @@ def test_deployment_contract_smart_session_alanlari_kodla_uyumlu() -> None:
         "session_policy",
         "smart_max_silence_sec",
         "dial_in_interval_min",
+        # 1.18.0: Dial-In izgarasinin baslangici (bkz. dial_in_plan).
+        "dial_in_anchor_min_utc",
         "smart_listen_reconnect_max_sec",
     ]
+    assert smart["dial_in_anchor_min_utc_range"] == "0..1439"
+    assert smart["dial_in_anchor_min_utc_default"] is None
     assert smart["smart_max_silence_min"] == _SMART_SILENCE_MIN_SEC
     assert smart["smart_max_silence_max"] == _SMART_SILENCE_MAX_SEC
     assert smart["smart_idle_health_state"] == "smart_idle"

@@ -289,3 +289,63 @@ def test_dongu_hatasi_thread_i_oldurmez(tmp_path: Path) -> None:
             r.stop(timeout_sec=3.0)
     finally:
         ob.close()
+
+
+# ---- JetStream hatalari ---------------------------------------------------
+# `JetStreamNotReadyError` docstring'i "retry_count artmaz" diyordu ama sinif
+# `transient` tasimadigi icin KALICI siniflaniyordu: 90 dk'lik NATS kesintisi
+# tum kuyrugu dead-letter'a tasiyordu. Testler yalnizca TransientPublishError
+# ile kosuyordu; gercek publisher tipleriyle hic sinanmamisti.
+
+
+def test_jetstream_not_ready_gecicidir() -> None:
+    from dnp3_gateway.messaging.jetstream_publisher import (
+        JetStreamNotReadyError,
+        JetStreamPublishError,
+    )
+
+    assert is_transient(JetStreamNotReadyError("x")) is True
+    assert is_transient(JetStreamPublishError("x")) is False
+
+
+def test_jetstream_hata_cevirisi_baglanti_gecici_api_reddi_kalici() -> None:
+    import concurrent.futures
+
+    from nats.js import errors as je
+
+    from dnp3_gateway.messaging.jetstream_publisher import (
+        JetStreamNotReadyError,
+        _yayin_hatasina_cevir,
+    )
+
+    for exc in (
+        concurrent.futures.TimeoutError(),
+        ConnectionResetError(),
+        je.NoStreamResponseError(),
+        je.ServiceUnavailableError(),
+    ):
+        assert isinstance(_yayin_hatasina_cevir(exc), JetStreamNotReadyError), exc
+    for exc in (je.NotFoundError(), je.BadRequestError(), ValueError("nan")):
+        assert is_transient(_yayin_hatasina_cevir(exc)) is False, exc
+
+
+def test_nats_kesintisinde_kuyruk_dead_letter_a_tasinmaz(tmp_path: Path) -> None:
+    from dnp3_gateway.messaging.jetstream_publisher import JetStreamNotReadyError
+
+    ob = Outbox(tmp_path / "ob.db")
+    try:
+        _enq(ob, "m1")
+        _enq(ob, "m2")
+
+        def hazir_degil(row: dict) -> None:  # noqa: ARG001
+            raise JetStreamNotReadyError("publisher not ready")
+
+        r = OutboxRetrier(ob, hazir_degil, max_retries=2)
+        for _ in range(5):
+            drained, transient = r._drain_batch(ob.fetch_batch(10))
+            assert (drained, transient) == (0, True)
+        rows = ob.fetch_batch(10)
+        assert [row["message_id"] for row in rows] == ["m1", "m2"], "kuyruk yerinde kalmali"
+        assert all(row["retry_count"] == 0 for row in rows), "gecici hatada retry_count artmamali"
+    finally:
+        ob.close()

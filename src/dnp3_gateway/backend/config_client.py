@@ -127,6 +127,15 @@ class DeviceConfig:
     #: Kabul araligi: 60..1440 dakika.
     dial_in_interval_min: int | None = None
 
+    #: Dial-In IZGARASININ UTC gun icindeki baslangici — DAKIKA (0..1439).
+    #:
+    #: Horstmann "Enable Dial-In Settings" acikken cihaz her gun Hour:Minute
+    #: (UTC) aninda ve oradan aralik adimlariyla arar; plan disi uyanma
+    #: izgarayi KAYDIRMAZ. Dolu ise beklenen rapor izgaradaki bir sonraki
+    #: centiktir (bkz. `dial_in_plan`). None = izgara bilinmiyor -> 1.17.0
+    #: davranisi (son temas + aralik). 1.18.0.
+    dial_in_anchor_min_utc: int | None = None
+
     #: `session_policy=smart|auto` + `ip_endpoint_type=listening` icin:
     #: gateway'in cihaza yeniden baglanma denemelerinin UST araligi (saniye).
     #:
@@ -1780,6 +1789,12 @@ def _parse_gateway_config(
                         "dial_in_interval_min",
                         lo=DIAL_IN_INTERVAL_MIN_MIN,
                         hi=DIAL_IN_INTERVAL_MIN_MAX,
+                    ),
+                    dial_in_anchor_min_utc=_parse_optional_int(
+                        item,
+                        "dial_in_anchor_min_utc",
+                        lo=0,
+                        hi=1439,
                     ),
                     smart_listen_reconnect_max_sec=_parse_optional_int(
                         item,
