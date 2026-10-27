@@ -2,7 +2,7 @@
 
 Semver'a gore tutulur. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.18.0] - 2026-10-26
+## [1.18.0] - 2026-10-27
 
 Dial-In beklentisi cihazin **sabit izgarasina** gore.
 
