@@ -342,6 +342,8 @@ def map_dnp3_quality(flags: int | None, object_group: int) -> str:
 #   - 4G/yavas linkler icin ust sinir 5-8 sn.
 #   - 15 sn TCP-up + DNP3-down sahte recovery'yi yakalamak icin yeterince agresif,
 #     ancak gercek yavas linkleri yanlislikla "lost" yapmaktan korur.
+# Listening+Smart'ta uyanma hakki varken bu sure `lost` yapmaz (bkz.
+# `_uyanma_hakki_var_mi`, 1.18.1).
 _RECOVERY_GRACE_SEC = 15.0
 
 # KOPUK CIHAZI KENDILIGINDEN YOKLAMA
@@ -1509,6 +1511,18 @@ class _DeviceCache:
         with self._lock:
             return self._last_valid_contact_wall or None
 
+    def note_wake_contact(self) -> None:
+        """Listening+Smart uyanmasi: sessizlik capasini tazele (1.18.1).
+
+        DNP3 KANITI DEGILDIR: `_session_evidence` ve `_evidence_seq` degismez.
+        Yalnizca "modem planli saatte erisilebilirdi" der; olcum getirmeyen
+        tek bir uyanmanin plan + tolerans sonra sahte comm_lost uretmesini
+        onler. Ust siniri `_uyanma_hakki_var_mi` koyar.
+        """
+        with self._lock:
+            self._last_valid_contact = time.monotonic()
+            self._last_valid_contact_wall = time.time()
+
     def enter_smart_idle(self, *, anchor_wall: float | None = None) -> bool:
         """`smart_idle`e ELLE gir. Donen: yeni girildi mi (idempotent).
 
@@ -2339,6 +2353,8 @@ class _OturumDurumu:
         #: Beklenen Dial-In raporu kacirildi mi (LATE / DEGRADED).
         #: `lost` DEGILDIR ve comm_lost URETMEZ.
         self.rapor_gecikti: bool = False
+        #: Bu uyanmada olcumsuz oturum log'u basildi mi (uyanma basina tek satir).
+        self.olcumsuz_uyanma_bildirildi: bool = False
         #: Aktif tanilama sondasi — son calistirma + son sonuclar.
         #: SALT TESHIS; saglik karari VERMEZLER.
         self.sonda_son_at: float = 0.0
@@ -4569,6 +4585,32 @@ class Yadnp3TelemetryReader(TelemetryReader):
         limit = self._smart_silence_limit(device)
         return bool(limit) and self._sessizlik_yasi(mm) > limit
 
+    def _uyanma_hakki_var_mi(self, mm: _ManagedMaster, device: DeviceConfig) -> bool:
+        """Listening+Smart: olcum getirmeyen BU uyanma affedilir mi? (1.18.1)
+
+        SAHA (TPAO PM-0001, 2026-10-28..11-02): modem uyandi, TCP acildi, 15 sn
+        icinde olcum gelmedi -> `lost` + comm_lost; sonraki uyanma normal. Dial-In
+        3 saatken tek uyanma ~3 saat "haberlesme arizasi" gosteriyordu.
+
+        KURAL: son OLCUM `smart_max_silence_sec` icindeyse uyanmanin olcumsuz
+        gecmesi kayip DEGILDIR. Olcum yasi bu esigi astiginda (Dial-In'de ust
+        uste ikinci uyanma) comm_lost grace sonunda aynen yayinlanir; link flap
+        etse de karar olcum yasina bagli oldugu icin sonsuza kadar ertelenemez.
+
+        Esik yoksa ya da cihaz initiating ise (orada bosa baglanti ariza
+        belirtisidir) eski 15 sn kurali gecerlidir.
+        """
+        if (device.ip_endpoint_type or "listening").strip().lower() == "initiating":
+            return False
+        limit = self._smart_silence_limit(device)
+        if not limit or self._sessizlik_yasi(mm) > limit:
+            return False
+        son_olcum = mm.cache.last_update_at()
+        olcum_yasi = (
+            time.monotonic() - son_olcum if son_olcum else max(0.0, time.time() - mm.olusturuldu_wall)
+        )
+        return olcum_yasi <= limit
+
     def _rapor_gecikmesi(self, mm: _ManagedMaster, device: DeviceConfig) -> tuple[float | None, bool]:
         """(gecikme_saniye, gecikti_mi) — beklenen Dial-In penceresine gore.
 
@@ -4653,6 +4695,9 @@ class Yadnp3TelemetryReader(TelemetryReader):
                 device.code,
                 uyanma,
             )
+            mm.olcumsuz_uyanma_bildirildi = False
+            if self._uyanma_hakki_var_mi(mm, device):
+                cache.note_wake_contact()
 
         if not cache.is_smart_idle():
             # LISTENING + SMART: baglanti YOK -> BEKLENEN uyku.
@@ -5076,8 +5121,21 @@ class Yadnp3TelemetryReader(TelemetryReader):
 
         # Recovery grace timeout: link acik ama hala fresh frame gelmedi →
         # tekrar lost. SCADA "comm_lost" gormeye devam eder; bu zaten dogru.
-        if cache_state == "recovering":
-            if cache.recovery_age() > _RECOVERY_GRACE_SEC:
+        if cache_state == "recovering" and cache.recovery_age() > _RECOVERY_GRACE_SEC:
+            if smart and self._uyanma_hakki_var_mi(mm, device):
+                # `recovering` KALIR: gec gelen olcum dogrudan `online` yapar ve
+                # kaybolmaz; olcum hic gelmezse link kapaninca `smart_idle`.
+                if not mm.olcumsuz_uyanma_bildirildi:
+                    mm.olcumsuz_uyanma_bildirildi = True
+                    logger.warning(
+                        "smart_uyanma_olcumsuz device=%s ip=%s grace_sec=%.0f kanit=%s — "
+                        "olcum gelmedi; tek uyanma kayip sayilmaz, comm_lost YAYINLANMADI",
+                        device.code,
+                        device.ip_address,
+                        _RECOVERY_GRACE_SEC,
+                        cache.session_evidence(),
+                    )
+            else:
                 cache.fail_recovery()
                 cache_state = "lost"
                 logger.warning(
@@ -5165,7 +5223,13 @@ class Yadnp3TelemetryReader(TelemetryReader):
             # `continuous`ta DOKUNULMAZ: orada `recovering` sirasinda
             # comm_lost tutmak bilincli bir karardir (sahte "online"
             # gostermemek icin) ve uzun sureli uretim davranisidir.
-            if smart and cache_state == "recovering" and cache.comm_lost_ertelenebilir(_RECOVERY_GRACE_SEC):
+            #
+            # 1.18.1: uyanma hakki varken durum ne olursa olsun comm_lost YOK
+            # (`recovering`; link bu cycle icinde kapandiysa `lost`/`smart_idle`).
+            if smart and (
+                self._uyanma_hakki_var_mi(mm, device)
+                or (cache_state == "recovering" and cache.comm_lost_ertelenebilir(_RECOVERY_GRACE_SEC))
+            ):
                 return [
                     SignalReading(
                         signal_key=s.key,
@@ -5484,8 +5548,19 @@ class Yadnp3TelemetryReader(TelemetryReader):
                     need_time=bool(iin.get("need_time")),
                 )
 
+                # Kanitsiz kapanista `lost` yalnizca sonraki cycle'a kadar surer
+                # (`_smart_idle_denetle` idle'a alir); rapora kopus diye gecmesin.
+                durum = mm.cache.state()
+                if (
+                    durum == "lost"
+                    and mm.session_policy == "smart"
+                    and not mm.cache.is_connected()
+                    and self._uyanma_hakki_var_mi(mm, mm.device)
+                ):
+                    durum = "smart_idle"
+
                 out[code] = {
-                    "state": mm.cache.state(),
+                    "state": durum,
                     # YAPILANDIRILAN ile ETKIN politika AYRI raporlanir:
                     # `auto` cihazda "ne istendi" ile "su an ne uygulaniyor"
                     # farkli olabilir ve teshis tam olarak bu farkta.

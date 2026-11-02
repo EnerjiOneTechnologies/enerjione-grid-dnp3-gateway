@@ -223,6 +223,7 @@ Mevcut uc durumlu makineye **`smart_idle`** eklendi:
 | `online -> smart_idle` | TCP kapandi, politika `smart`, **oturumda kanit gorulmus** |
 | `* -> lost` | TCP kapandi, politika `smart`, **oturumda kanit YOK** |
 | `smart_idle -> lost` | Sessizlik esigi asildi (bolum 5) |
+| `recovering -> lost` | Grace (15 sn) doldu; listening + esik tanimliysa YALNIZCA son olcum esigi astiysa (bolum 5d) |
 | `smart_idle -> recovering` | Cihaz yeniden baglandi |
 
 ### "Gecerli DNP3 kaniti" nedir
@@ -528,6 +529,25 @@ operation_mode=unknown periodic_scans=true event_scan=5s baseline_scan=30s
 
 `periodic_scans=true` gorulduyse cihaz **5 saniyede bir** Class 1/2/3 istegi
 gonderiyor demektir ve Horstmann'in hareketsizlik sayaci **asla dolamaz**.
+
+---
+
+## 5d. Tek olcumsuz uyanma kayip degildir (1.18.1)
+
+Listening + Smart, sessizlik esigi tanimli cihazlar. Saha: modem planli saatte
+uyanir, TCP acilir ama oturum olcum getirmez; sonraki uyanma normaldir.
+
+| Durum | Sonuc |
+|---|---|
+| Son olcum esik icinde, bu uyanma olcumsuz | `recovering`, link kapaninca `smart_idle`; comm_lost YOK |
+| Grace'ten sonra olcum geldi | `online`, olcum yayinlanir |
+| Ust uste ikinci olcumsuz uyanma (olcum yasi > esik) | Grace sonunda `lost` + comm_lost |
+| Hic baglanti yok | Bolum 5: esik asilinca `lost` + comm_lost |
+
+Karar **son olcum yasina** baglidir; TCP acilisi yalnizca sessizlik capasini
+tazeler ve DNP3 kaniti SAYILMAZ. Olcum getirmeyen link flap'i bu yuzden bozuk
+cihazi sonsuza kadar gizleyemez. Initiating ve esiksiz cihazlarda 15 sn kurali
+degismedi. Log: `smart_uyanma_olcumsuz ... kanit=<True|False>`.
 
 ---
 
