@@ -146,6 +146,11 @@ def _smart_cihaz(saha, code="SN2_0", **kw):
     )
 
 
+def _esiksiz_smart_cihaz(saha, code="SN2_0"):
+    """Sessizlik esigi YOK: uyanma hakki uygulanmaz, 15 sn kurali gecerlidir."""
+    return saha.cihaz(code, ip_endpoint_type="listening", session_policy="smart")
+
+
 def _online_yap(saha, device) -> None:
     saha.link_acildi(device.code)
     saha.veri_geldi(device.code)
@@ -225,7 +230,7 @@ def test_3_eski_kare_sonsuz_relink_dongusu_uretmez(saha) -> None:
 
         lost -> relink -> recovering -> 15sn -> timeout -> lost -> relink ...
     """
-    d = _smart_cihaz(saha)
+    d = _esiksiz_smart_cihaz(saha)
     _online_yap(saha, d)
 
     # Cihaz susuyor ama TCP acik; recovery'yi zorla ve grace'i doldur.
@@ -253,7 +258,7 @@ def test_3_eski_kare_sonsuz_relink_dongusu_uretmez(saha) -> None:
 
 def test_5_recovery_timeout_sonrasi_ayni_kare_lost_birakir(saha) -> None:
     """Kanit sinirinin dogrudan birim testi."""
-    d = _smart_cihaz(saha)
+    d = _esiksiz_smart_cihaz(saha)
     _online_yap(saha, d)
     mm = saha.master(d.code)
 
@@ -276,7 +281,7 @@ def test_5_recovery_timeout_sonrasi_ayni_kare_lost_birakir(saha) -> None:
 
 
 def test_4_yeni_link_ve_yeni_kare_ile_online_olunur(saha) -> None:
-    d = _smart_cihaz(saha)
+    d = _esiksiz_smart_cihaz(saha)
     _online_yap(saha, d)
     mm = saha.master(d.code)
 
@@ -325,7 +330,7 @@ def test_6_uyanma_pazarliginda_comm_lost_ertelenir(saha) -> None:
 
 def test_6b_grace_gercekten_dolarsa_comm_lost_yayinlanir(saha) -> None:
     """Erteleme BASTIRMA DEGILDIR: gercek ariza GORUNUR kalmali."""
-    d = _smart_cihaz(saha)
+    d = _esiksiz_smart_cihaz(saha)
     _online_yap(saha, d)
     saha.link_kapandi(d.code)
     saha.oku(d)
@@ -351,7 +356,7 @@ def test_6c_link_flap_ederse_erteleme_sonsuz_uzamaz(saha) -> None:
     bir cihaz SONSUZA KADAR saglikli gorunurdu. Erteleme damgasi yalnizca
     GERCEK `online` gecisinde sifirlanir.
     """
-    d = _smart_cihaz(saha)
+    d = _esiksiz_smart_cihaz(saha)
     _online_yap(saha, d)
     saha.link_kapandi(d.code)
     saha.oku(d)
@@ -369,6 +374,160 @@ def test_6c_link_flap_ederse_erteleme_sonsuz_uzamaz(saha) -> None:
                 mm.cache._comm_lost_erteleme_at -= GRACE / 3
 
     assert "comm_lost" in kalite, "link flap ederken comm_lost SONSUZA KADAR ertelendi — bozuk cihaz gizlenir"
+
+
+# ==========================================================================
+# 1.18.1 — TEK OLCUMSUZ UYANMA HAKKI (saha: TPAO PM-0001, 2026-10-28..11-02)
+# ==========================================================================
+#
+# Modem planli saatte uyandi, TCP acildi, olcum gelmedi -> eski kod 15 sn sonra
+# comm_lost basiyordu ve alarm sonraki uyanmaya (3 saat) kadar kaliyordu.
+
+DIAL_IN = 10800  # 180 dk
+LIMIT = 12600  # Dial-In + 30 dk tolerans
+
+
+def _saat_ilerlet(saha, code: str, saniye: float) -> None:
+    """Cihazin tum zaman damgalarini GERIYE al (monotonic + duvar saati)."""
+    mm = saha.master(code)
+    c = mm.cache
+    with c._lock:
+        for alan in (
+            "_last_evidence_at",
+            "_last_update_at",
+            "_recovery_started_at",
+            "_recovery_anchor_at",
+            "_last_valid_contact",
+            "_last_valid_contact_wall",
+            "_smart_idle_since",
+            "_smart_idle_since_wall",
+            "_link_opened_at",
+            "_comm_lost_erteleme_at",
+        ):
+            deger = getattr(c, alan, 0.0)
+            if deger:
+                setattr(c, alan, deger - saniye)
+    mm.olusturuldu_wall -= saniye
+
+
+def _uyuyan_cihaz(saha, **kw):
+    d = saha.cihaz(
+        "PM-1", ip_endpoint_type="listening", session_policy="smart", smart_max_silence_sec=LIMIT, **kw
+    )
+    _online_yap(saha, d)
+    saha.link_kapandi(d.code)
+    saha.oku(d)
+    assert saha.master(d.code).cache.state() == "smart_idle", "on kosul: uykuya gecilmedi"
+    return d
+
+
+def _olcumsuz_uyanma(saha, d) -> set[str]:
+    """Planli saatte TCP acilir, olcum gelmez, oturum kapanir; yayinlanan kaliteler."""
+    _saat_ilerlet(saha, d.code, DIAL_IN)
+    kalite: set[str] = set()
+    saha.link_acildi(d.code)
+    kalite |= _kaliteler(saha.oku(d))
+    _saat_ilerlet(saha, d.code, GRACE + 2)
+    kalite |= _kaliteler(saha.oku(d))
+    saha.link_kapandi(d.code)
+    kalite |= _kaliteler(saha.oku(d))
+    return kalite
+
+
+def test_tek_olcumsuz_uyanma_comm_lost_uretmez(saha) -> None:
+    d = _uyuyan_cihaz(saha)
+    assert "comm_lost" not in _olcumsuz_uyanma(saha, d)
+    assert saha.master(d.code).cache.state() == "smart_idle"
+
+    # Eski capaya gore esik burada dolardi; uyanma capayi tazeledi.
+    _saat_ilerlet(saha, d.code, 2400)
+    assert "comm_lost" not in _kaliteler(saha.oku(d))
+    assert saha.master(d.code).cache.state() == "smart_idle"
+
+
+def test_grace_sonrasi_durum_recovering_kalir_ve_gec_olcum_kaybolmaz(saha) -> None:
+    d = _uyuyan_cihaz(saha)
+    mm = saha.master(d.code)
+    _saat_ilerlet(saha, d.code, DIAL_IN)
+    saha.link_acildi(d.code)
+    saha.oku(d)
+    _saat_ilerlet(saha, d.code, GRACE + 2)
+    assert "comm_lost" not in _kaliteler(saha.oku(d))
+    assert mm.cache.state() == "recovering"
+
+    saha.veri_geldi(d.code, akim=33.0)
+    okumalar = saha.oku(d)
+    assert mm.cache.state() == "online", "gec gelen olcum online yapmadi"
+    assert "good" in _kaliteler(okumalar), "gec gelen olcum yayinlanmadi"
+
+
+def test_ust_uste_ikinci_olcumsuz_uyanma_comm_lost_uretir(saha) -> None:
+    d = _uyuyan_cihaz(saha)
+    assert "comm_lost" not in _olcumsuz_uyanma(saha, d)
+    assert "comm_lost" in _olcumsuz_uyanma(saha, d), "ikinci olcumsuz uyanma GIZLENDI"
+    # Tek alarm: sonraki okumalar tekrar comm_lost basmaz.
+    assert "comm_lost" not in _kaliteler(saha.oku(d))
+
+
+def test_basarili_uyanma_hakki_yeniler(saha) -> None:
+    d = _uyuyan_cihaz(saha)
+    assert "comm_lost" not in _olcumsuz_uyanma(saha, d)
+
+    _saat_ilerlet(saha, d.code, DIAL_IN)
+    _online_yap(saha, d)
+    saha.link_kapandi(d.code)
+    saha.oku(d)
+
+    assert "comm_lost" not in _olcumsuz_uyanma(saha, d), "basarili uyanma hakki yenilemedi"
+
+
+def test_olcumsuz_link_flap_bozuk_cihazi_sonsuza_kadar_gizlemez(saha) -> None:
+    """EN TEHLIKELI SESSIZ BASARISIZLIK: her TCP acilisi capayi tazeleyemez."""
+    d = _uyuyan_cihaz(saha)
+    kalite: set[str] = set()
+    for _ in range(12):
+        _saat_ilerlet(saha, d.code, 1800)
+        saha.link_acildi(d.code)
+        kalite |= _kaliteler(saha.oku(d))
+        saha.link_kapandi(d.code)
+        kalite |= _kaliteler(saha.oku(d))
+    assert "comm_lost" in kalite, "olcum getirmeyen flap comm_lost uretmedi — bozuk cihaz gizlenir"
+
+
+def test_hic_baglanamayan_cihazda_sessizlik_kurali_aynen(saha) -> None:
+    d = _uyuyan_cihaz(saha)
+    _saat_ilerlet(saha, d.code, LIMIT + 1)
+    assert "comm_lost" in _kaliteler(saha.oku(d))
+    assert saha.master(d.code).cache.state() == "lost"
+
+
+def test_initiating_cihazda_15sn_kurali_aynen(saha) -> None:
+    d = saha.cihaz("PM-2", ip_endpoint_type="initiating", session_policy="smart", smart_max_silence_sec=LIMIT)
+    _online_yap(saha, d)
+    saha.link_kapandi(d.code)
+    saha.oku(d)
+    saha.link_acildi(d.code)
+    saha.oku(d)
+    _saat_ilerlet(saha, d.code, GRACE + 2)
+    assert "comm_lost" in _kaliteler(saha.oku(d))
+    assert saha.master(d.code).cache.state() == "lost"
+
+
+def test_kanitsiz_kapanis_sagliga_kopus_diye_yazilmaz(saha) -> None:
+    """Ekrandaki `Toparlaniyor -> Haberlesme Kaybi -> Smart Bekleme` satiri."""
+    d = _uyuyan_cihaz(saha)
+    mm = saha.master(d.code)
+    _saat_ilerlet(saha, d.code, DIAL_IN)
+    saha.link_acildi(d.code)
+    saha.oku(d)
+    saha.link_kapandi(d.code)  # kanit yok: sonraki cycle'a kadar ic durum `lost`
+    assert mm.cache.state() == "lost"
+    assert saha.reader.device_health()[d.code]["state"] == "smart_idle"
+
+    # Esik gercekten asildiysa `lost` AYNEN raporlanir.
+    _saat_ilerlet(saha, d.code, LIMIT + 1)
+    saha.oku(d)
+    assert saha.reader.device_health()[d.code]["state"] == "lost"
 
 
 # ==========================================================================

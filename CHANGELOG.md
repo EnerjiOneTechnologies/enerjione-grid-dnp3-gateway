@@ -2,6 +2,34 @@
 
 Semver'a gore tutulur. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.18.1] - 2026-11-02
+
+Tek olcumsuz uyanma artik **haberlesme kaybi degil** (listening + Smart).
+
+### Fixed
+
+- **Olcum getirmeyen tek uyanma sahte comm_lost uretiyordu.** Saha (TPAO
+  PM-0001, Dial-In 3 saat): modem planli saatte uyanir, TCP acilir, 15 sn icinde
+  olcum gelmez -> `lost` + comm_lost; sonraki uyanma normal. Tek uyanma ~3 saat
+  "haberlesme arizasi" gosteriyor, kenar kurali ("kayip = sessizlik esigi
+  asildi") bu yoldan atlaniyordu.
+  - Son OLCUM `smart_max_silence_sec` icindeyse grace (15 sn) dolunca durum
+    `recovering` kalir ve comm_lost yayinlanmaz. Gec gelen olcum dogrudan
+    `online` yapar ve kaybolmaz; hic gelmezse link kapaninca `smart_idle`.
+  - Uyanmadaki TCP acilisi sessizlik capasini tazeler (DNP3 kaniti SAYILMAZ);
+    yoksa tek uyanma plan + tolerans sonra yine comm_lost uretirdi.
+  - Ust uste ikinci olcumsuz uyanmada olcum yasi esigi astigi icin comm_lost
+    grace sonunda aynen yayinlanir. Olcum getirmeyen link flap'i de bu yuzden
+    bozuk cihazi sonsuza kadar gizleyemez.
+  - Log: `smart_uyanma_olcumsuz` (uyanma basina tek satir, `kanit=` oturumda
+    DNP3 yaniti gorulup gorulmedigini soyler).
+- **Kanitsiz kapanista saglik raporunda ~2 sn `lost`.** Listening + Smart'ta
+  durum sonraki cycle'da zaten `smart_idle`e doner; ara deger olay listesine
+  "Haberlesme Kaybi" olarak dusuyordu. Esik asilmadiysa `smart_idle` raporlanir.
+
+Degismeyenler: `continuous`, initiating ve sessizlik esigi tanimsiz cihazlar
+(15 sn kurali aynen), hic baglanamayan cihaz (esik asilinca comm_lost).
+
 ## [1.18.0] - 2026-10-27
 
 Dial-In beklentisi cihazin **sabit izgarasina** gore.
